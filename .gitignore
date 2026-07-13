@@ -1,0 +1,38 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+build
+model/
+public/models/
+public/models_fengjin/
+public/character.*
+public/tray_icon.*
+public/vite.svg
+src/assets/
+*.local
+
+# Environment variables
+.env
+
+# Runtime data and local user assets
+data/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
