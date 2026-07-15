@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "model": "/models/desktop-pet.pmx",
+  "motions": {
+    "idle": {
+      "file": "/models/motions/idle.vmd",
+      "loop": true,
+      "priority": 0,
+      "fadeIn": 0.4,
+      "fadeOut": 0.4
+    },
+    "tapHead": {
+      "file": "/models/motions/tap-head.vmd",
+      "priority": 20,
+      "cooldown": 2
+    },
+    "tapBody": {
+      "file": "/models/motions/tap-body.vmd",
+      "priority": 20,
+      "cooldown": 2
+    },
+    "attention": { "file": "/models/motions/attention.vmd", "priority": 10 },
+    "thinking": { "file": "/models/motions/thinking.vmd", "priority": 10 },
+    "speaking": { "file": "/models/motions/speaking.vmd", "priority": 10 },
+    "magic": { "file": "/models/motions/magic.vmd", "priority": 30 },
+    "greet": { "file": "/models/motions/greet.vmd", "priority": 20 },
+    "confused": { "file": "/models/motions/confused.vmd", "priority": 30 }
+  },
+  "bones": {
+    "head": ["頭", "Head", "head"],
+    "eyes": ["両目", "Eyes", "eyes"]
+  },
+  "expressions": {
+    "blink": ["まばたき", "blink"],
+    "smile": ["笑い", "smile"],
+    "angry": ["怒り", "angry"],
+    "surprised": ["びっくり", "surprised"],
+    "sad": ["悲しい", "sad"],
+    "mouthOpen": ["あ", "口開け", "mouthOpen", "A"]
+  },
+  "interactions": {
+    "head": { "motion": "tapHead", "expression": "smile", "cooldown": 2 },
+    "body": { "motion": "tapBody", "expression": "surprised", "cooldown": 2 }
+  },
+  "events": {
+    "attention": { "motion": "attention", "expression": "surprised" },
+    "thinking": { "motion": "thinking" },
+    "speaking": { "motion": "speaking", "expression": "smile" },
+    "desktopComment": { "motion": "speaking", "expression": "smile" },
+    "imageGenerating": { "motion": "magic", "expression": "smile" },
+    "proactive": { "motion": "greet", "expression": "smile" },
+    "error": { "motion": "confused", "expression": "sad" }
+  }
+}

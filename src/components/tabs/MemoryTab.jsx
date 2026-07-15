@@ -46,7 +46,7 @@ export default function MemoryTab({
                 icon={Database}
                 title="记忆管理"
                 description="查看会话上下文、摘要以及跨会话持久化事实。"
-                actions={<Button icon={RefreshCw} size="sm" onClick={fetchSessionList}>刷新</Button>}
+                actions={<Button icon={RefreshCw} onClick={fetchSessionList}>刷新</Button>}
             />
 
             <Section title="会话记忆" description={`${filteredSessions.length} 个活跃会话`}>
@@ -175,7 +175,7 @@ export default function MemoryTab({
             <Section
                 title={`持久化事实（${persistentMemoryList.length}）`}
                 description="这些事实会在启用持久化记忆后注入所有会话。"
-                action={<Button icon={Save} size="sm" variant="primary" onClick={savePersistentMemory}>保存</Button>}
+                action={<Button icon={Save} variant="primary" onClick={savePersistentMemory}>保存</Button>}
             >
                 <div className="space-y-2">
                     {persistentMemoryList.length === 0 && (

@@ -1,18 +1,23 @@
 // electron/main.js - Electron 主进程 (桌宠模式)
-const { app, BrowserWindow, Tray, Menu, shell, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell, ipcMain, screen, systemPreferences } = require('electron');
 const path = require('path');
 const { fork } = require('child_process');
+const { createDesktopObserver } = require('./desktop-observer');
 
 let mainWindow = null;
 let tray = null;
 let serverProcess = null;
+let desktopObserver = null;
+let cursorTrackingTimer = null;
 let isPassthrough = false;
 let isPetVisible = true;
+let hidePetFromCapture = true;
 const isDev = process.env.NODE_ENV !== 'production';
 const PET_WIDTH = 250;
 const PET_HEIGHT = 400;
 const API_PORT = process.env.API_PORT || process.env.PORT || '3001';
 const CONFIG_URL = `http://localhost:${API_PORT}`;
+const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
 
 // --- 启动 Express 后端 ---
 function startServer() {
@@ -33,7 +38,48 @@ function startServer() {
         if (message?.type === 'set-desktop-pet-visible') {
             setPetVisible(Boolean(message.visible));
         }
+        if (message?.type === 'desktop-awareness-config') {
+            hidePetFromCapture = message.config?.desktopAwarenessHidePetFromCapture !== false;
+            mainWindow?.setContentProtection(hidePetFromCapture);
+            desktopObserver?.updateConfig(message.config || {});
+            rebuildTrayMenu();
+        }
     });
+}
+
+function createObserver() {
+    desktopObserver = createDesktopObserver({
+        sendFrame: (frame) => {
+            if (serverProcess?.connected) {
+                serverProcess.send({ type: 'desktop-awareness-frame', frame });
+            }
+        },
+        onStatus: (state) => {
+            if (serverProcess?.connected) {
+                serverProcess.send({ type: 'desktop-awareness-state', state });
+            }
+            rebuildTrayMenu();
+        },
+    });
+    desktopObserver.start();
+}
+
+function setDesktopAwarenessEnabled(enabled) {
+    if (enabled && process.platform === 'darwin' && !systemPreferences.isTrustedAccessibilityClient(false)) {
+        systemPreferences.isTrustedAccessibilityClient(true);
+    }
+    if (serverProcess?.connected) {
+        serverProcess.send({ type: 'set-desktop-awareness-enabled', enabled: Boolean(enabled) });
+    }
+}
+
+function setHidePetFromCapture(enabled) {
+    hidePetFromCapture = Boolean(enabled);
+    mainWindow?.setContentProtection(hidePetFromCapture);
+    if (serverProcess?.connected) {
+        serverProcess.send({ type: 'set-desktop-capture-hide-pet', enabled: hidePetFromCapture });
+    }
+    rebuildTrayMenu();
 }
 
 function notifyServerPetState() {
@@ -44,6 +90,7 @@ function notifyServerPetState() {
 
 function setPetVisible(visible) {
     isPetVisible = visible;
+    desktopObserver?.setSuspended(!visible);
     if (mainWindow) {
         if (visible) mainWindow.showInactive();
         else mainWindow.hide();
@@ -76,11 +123,13 @@ function createPetWindow() {
 
     // 窗口始终可交互（不使用穿透，确保拖拽可用）
     mainWindow.setIgnoreMouseEvents(false);
+    // Keep the pet itself out of desktop-awareness screenshots where the OS supports it.
+    mainWindow.setContentProtection(hidePetFromCapture);
 
     // 加载桌宠页面
     if (isDev) {
         // 开发模式：连接 Vite dev server
-        mainWindow.loadURL('http://localhost:5173/pet.html');
+        mainWindow.loadURL(`${DEV_SERVER_URL.replace(/\/$/, '')}/pet.html`);
         mainWindow.webContents.openDevTools({ mode: 'detach' });
     } else {
         // 生产模式：加载构建产物
@@ -89,19 +138,41 @@ function createPetWindow() {
 
     mainWindow.on('show', () => {
         isPetVisible = true;
+        desktopObserver?.setSuspended(false);
         notifyServerPetState();
         rebuildTrayMenu();
     });
     mainWindow.on('hide', () => {
         isPetVisible = false;
+        desktopObserver?.setSuspended(true);
         notifyServerPetState();
         rebuildTrayMenu();
     });
     mainWindow.on('closed', () => {
         mainWindow = null;
         isPetVisible = false;
+        desktopObserver?.setSuspended(true);
         notifyServerPetState();
     });
+}
+
+function startCursorTracking() {
+    if (cursorTrackingTimer) return;
+    cursorTrackingTimer = setInterval(() => {
+        if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+        const point = screen.getCursorScreenPoint();
+        const bounds = mainWindow.getBounds();
+        mainWindow.webContents.send('global-cursor-moved', {
+            x: point.x,
+            y: point.y,
+            windowBounds: bounds,
+        });
+    }, 50);
+}
+
+function stopCursorTracking() {
+    if (cursorTrackingTimer) clearInterval(cursorTrackingTimer);
+    cursorTrackingTimer = null;
 }
 
 // --- 系统托盘 ---
@@ -138,6 +209,20 @@ function rebuildTrayMenu() {
                 if (mainWindow) mainWindow.setAlwaysOnTop(item.checked);
             }
         },
+        {
+            label: '桌面感知',
+            type: 'checkbox',
+            enabled: Boolean(serverProcess?.connected),
+            checked: Boolean(desktopObserver?.getState().enabled),
+            click: (item) => setDesktopAwarenessEnabled(item.checked)
+        },
+        {
+            label: '截图隐藏',
+            type: 'checkbox',
+            enabled: Boolean(serverProcess?.connected),
+            checked: hidePetFromCapture,
+            click: (item) => setHidePetFromCapture(item.checked)
+        },
         { type: 'separator' },
         {
             label: '退出',
@@ -160,9 +245,6 @@ function createTray() {
     tray = new Tray(icon);
     tray.setToolTip('HYACINE-AI 桌宠');
     rebuildTrayMenu();
-    tray.on('click', () => {
-        if (mainWindow && !mainWindow.isVisible()) setPetVisible(true);
-    });
 }
 
 // --- IPC: 渲染进程 → 主进程 ---
@@ -201,10 +283,31 @@ ipcMain.on('drag-end', () => {
 });
 
 // 窗口缩放
-ipcMain.on('resize-pet-window', (_event, { width, height }) => {
+ipcMain.on('resize-pet-window', (_event, { width, height, anchorBottom }) => {
     if (mainWindow) {
-        mainWindow.setSize(Math.round(width), Math.round(height));
+        const nextWidth = Math.round(width);
+        const nextHeight = Math.round(height);
+        if (anchorBottom) {
+            const [x, y] = mainWindow.getPosition();
+            const [, currentHeight] = mainWindow.getSize();
+            mainWindow.setBounds({
+                x,
+                y: y + currentHeight - nextHeight,
+                width: nextWidth,
+                height: nextHeight,
+            });
+        } else {
+            mainWindow.setSize(nextWidth, nextHeight);
+        }
     }
+});
+
+ipcMain.handle('test-desktop-awareness', async () => {
+    if (!desktopObserver) return { ok: false, message: '桌面感知尚未初始化' };
+    // The pet menu itself can become focused; let macOS restore the prior app first.
+    mainWindow?.blur();
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return desktopObserver.requestTest();
 });
 
 // 穿透模式切换
@@ -218,19 +321,25 @@ ipcMain.on('toggle-passthrough', () => {
 
 // --- App 生命周期 ---
 app.whenReady().then(() => {
+    createObserver();
     startServer();
     // 等 server 启动
     setTimeout(() => {
         createPetWindow();
         createTray();
+        startCursorTracking();
     }, 1500);
 });
 
 app.on('window-all-closed', () => {
+    stopCursorTracking();
+    desktopObserver?.stop();
     if (serverProcess) serverProcess.kill();
     app.quit();
 });
 
 app.on('before-quit', () => {
+    stopCursorTracking();
+    desktopObserver?.stop();
     if (serverProcess) serverProcess.kill();
 });

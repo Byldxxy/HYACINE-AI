@@ -44,6 +44,7 @@ export default defineConfig([
       'server.js',
       'types.js',
       'test-bot.js',
+      'test/**/*.js',
       'lib/**/*.js',
       'electron/**/*.js',
     ],

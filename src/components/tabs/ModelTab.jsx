@@ -20,7 +20,7 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
                 description="配置文本、生图模型以及机器人输出行为。"
             />
 
-            <Section title="API 与模型" description="支持 OpenAI Chat Completions 兼容接口。">
+            <Section title="API 与模型" description="支持 OpenAI Chat Completions 兼容接口；识图需要文本模型支持视觉输入。">
                 <div className="grid gap-4 md:grid-cols-2">
                     <InputGroup label="文本 API Endpoint" value={config.apiEndpoint} onChange={(e) => handleChange('apiEndpoint', e.target.value)} />
                     <InputGroup label="文本模型" value={config.modelName} onChange={(e) => handleChange('modelName', e.target.value)} />
@@ -80,7 +80,7 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
             <Section
                 title="角色参考图"
                 description="参考图存放于 data/avatars，用于支持图生图的模型。"
-                action={<Button icon={RefreshCw} size="sm" onClick={fetchAvatars}>刷新</Button>}
+                action={<Button icon={RefreshCw} onClick={fetchAvatars}>刷新</Button>}
             >
                 {avatarList.length === 0 ? (
                     <div className="empty-state">

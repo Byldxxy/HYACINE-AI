@@ -16,6 +16,7 @@ const { createMemoryManager } = require('./lib/memory');
 const { observeMessage, restartProactiveTimer } = require('./lib/proactive');
 const { createMessageHandler, sendToQQ } = require('./lib/message-handler');
 const { generateImage } = require('./lib/image-gen');
+const { createDesktopAwarenessEngine, normalizeDesktopAwarenessConfig } = require('./lib/desktop-awareness');
 const { getRuntimePaths, prepareRuntimeData } = require('./lib/paths');
 
 // ==========================================
@@ -63,11 +64,55 @@ app.get(/.*/, (req, res, next) => {
 // --- 内存状态 ---
 let napcatConnections = [];
 let desktopPetVisible = true;
+let desktopAwarenessState = { enabled: false, paused: false, status: 'disabled', detail: '' };
+let desktopAwarenessEngine = null;
 const desktopPetAvailable = process.env.ELECTRON_DESKTOP_PET === '1' && typeof process.send === 'function';
 
 process.on('message', (message) => {
     if (message?.type === 'desktop-pet-state') {
         desktopPetVisible = Boolean(message.visible);
+    }
+    if (message?.type === 'desktop-awareness-state') {
+        const previousStatus = desktopAwarenessState.status;
+        desktopAwarenessState = { ...desktopAwarenessState, ...message.state };
+        if (wssRef && message.state?.status !== previousStatus) {
+            if (message.state?.status === 'permission-denied') {
+                broadcastLog(wssRef, 'error', message.state.detail || '桌面感知缺少屏幕录制权限');
+            } else if (message.state?.status === 'error') {
+                broadcastLog(wssRef, 'error', `桌面感知暂停: ${message.state.detail || '未知错误'}`);
+            }
+        }
+    }
+    if (message?.type === 'set-desktop-awareness-enabled') {
+        const config = configManager.getConfig();
+        configManager.saveConfig({
+            ...config,
+            enableDesktopAwareness: Boolean(message.enabled),
+        }).then(() => {
+            syncDesktopAwarenessConfig();
+            if (wssRef) {
+                broadcastLog(wssRef, 'system', `桌面感知已${message.enabled ? '启用' : '停用'}`);
+            }
+        }).catch((error) => {
+            console.error('更新桌面感知开关失败:', error.message);
+        });
+    }
+    if (message?.type === 'set-desktop-capture-hide-pet') {
+        const config = configManager.getConfig();
+        configManager.saveConfig({
+            ...config,
+            desktopAwarenessHidePetFromCapture: Boolean(message.enabled),
+        }).then(() => {
+            syncDesktopAwarenessConfig();
+            if (wssRef) {
+                broadcastLog(wssRef, 'system', `截图桌宠保护已${message.enabled ? '启用' : '关闭'}`);
+            }
+        }).catch((error) => {
+            console.error('更新截图桌宠保护失败:', error.message);
+        });
+    }
+    if (message?.type === 'desktop-awareness-frame') {
+        desktopAwarenessEngine?.handleFrame(message.frame);
     }
 });
 
@@ -92,6 +137,34 @@ const broadcastLog = (wss, type, message) => {
     });
 };
 
+const broadcastPetEvent = (wss, event, detail = {}) => {
+    const payload = JSON.stringify({ type: 'pet:event', event, detail });
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN && client.isPet) client.send(payload);
+    });
+};
+
+desktopAwarenessEngine = createDesktopAwarenessEngine({
+    getConfig: () => configManager.getConfig(),
+    emitPetEvent: (event, detail) => wssRef && broadcastPetEvent(wssRef, event, detail),
+    broadcastLog: (type, message) => wssRef && broadcastLog(wssRef, type, message),
+});
+
+function syncDesktopAwarenessConfig() {
+    if (!desktopPetAvailable) return;
+    const config = configManager.getConfig();
+    process.send({
+        type: 'desktop-awareness-config',
+        config: {
+            enableDesktopAwareness: config.enableDesktopAwareness,
+            desktopAwarenessInterval: config.desktopAwarenessInterval,
+            desktopAwarenessChangeThreshold: config.desktopAwarenessChangeThreshold,
+            desktopAwarenessExcludedTerms: config.desktopAwarenessExcludedTerms,
+            desktopAwarenessHidePetFromCapture: config.desktopAwarenessHidePetFromCapture !== false,
+        },
+    });
+}
+
 // --- 创建消息处理器 ---
 let wssRef = null; // 将在后面赋值
 const handleQQMessage = createMessageHandler({
@@ -101,12 +174,14 @@ const handleQQMessage = createMessageHandler({
     broadcastLog: (ws, type, msg) => wssRef && broadcastLog(wssRef, type, msg),
     get wss() { return wssRef; },
     observeMessage,
+    emitPetEvent: (event, detail) => wssRef && broadcastPetEvent(wssRef, event, detail),
 });
 
 // --- 初始化系统 ---
 async function initSystem() {
     await configManager.loadConfig();
     await memory.loadAll();
+    syncDesktopAwarenessConfig();
 }
 const initPromise = initSystem(); // 初始化完成后在 wss 就绪后手动启动主动发言
 
@@ -162,6 +237,7 @@ app.post('/api/config', async (req, res) => {
         await configManager.saveConfig(incoming);
         if (wssRef) broadcastLog(wssRef, 'system', '配置已更新');
         enhancedRestartProactiveTimer();
+        syncDesktopAwarenessConfig();
         res.json({ success: true });
     } catch (_error) {
         res.status(500).json({ success: false });
@@ -188,6 +264,23 @@ app.post('/api/desktop-pet', (req, res) => {
     desktopPetVisible = Boolean(req.body?.visible);
     process.send({ type: 'set-desktop-pet-visible', visible: desktopPetVisible });
     res.json({ available: true, visible: desktopPetVisible });
+});
+
+app.get('/api/desktop-awareness', (_req, res) => {
+    const settings = normalizeDesktopAwarenessConfig(configManager.getConfig());
+    const engineState = desktopAwarenessEngine?.getState();
+    const petConnected = Boolean(wssRef && [...wssRef.clients].some(client => client.isPet && client.readyState === WebSocket.OPEN));
+    res.json({
+        available: desktopPetAvailable,
+        enabled: settings.enabled,
+        paused: desktopAwarenessState.paused,
+        status: desktopPetAvailable ? desktopAwarenessState.status : 'unavailable',
+        detail: desktopAwarenessState.detail || '',
+        processing: Boolean(engineState?.processing),
+        lastResult: engineState?.lastResult?.status || 'idle',
+        lastResultDiagnostics: engineState?.lastResult?.diagnostics || {},
+        petConnected,
+    });
 });
 
 // --- 记忆 API ---
@@ -392,6 +485,10 @@ wss.on('connection', (ws) => {
             ws.isFrontend = true;
             return;
         }
+        if (msgStr === 'iam_pet') {
+            ws.isPet = true;
+            return;
+        }
 
         if (!ws.isFrontend && !napcatConnections.includes(ws)) {
             napcatConnections.push(ws);
@@ -419,6 +516,7 @@ const proactiveCheckDeps = () => ({
     sendToQQ,
     saveMemoryToDisk: () => memory.saveMemoryToDisk(),
     broadcastLog: (ws, type, msg) => broadcastLog(wss, type, msg),
+    emitPetEvent: (event, detail) => broadcastPetEvent(wss, event, detail),
     wss,
 });
 

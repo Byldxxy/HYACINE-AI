@@ -17,6 +17,7 @@ public/models_fengjin/
 public/character.*
 public/tray_icon.*
 public/vite.svg
+public/pet-manifest.json
 src/assets/
 *.local
 

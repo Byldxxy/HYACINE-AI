@@ -19,12 +19,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     // 穿透模式回调
     onPassthroughChanged: (callback) => {
-        ipcRenderer.on('passthrough-changed', (_e, val) => callback(val));
+        const listener = (_e, val) => callback(val);
+        ipcRenderer.on('passthrough-changed', listener);
+        return () => ipcRenderer.removeListener('passthrough-changed', listener);
+    },
+    onGlobalCursorMoved: (callback) => {
+        const listener = (_event, payload) => callback(payload);
+        ipcRenderer.on('global-cursor-moved', listener);
+        return () => ipcRenderer.removeListener('global-cursor-moved', listener);
     },
     togglePassthrough: () => {
         ipcRenderer.send('toggle-passthrough');
     },
-    resizePetWindow: (width, height) => {
-        ipcRenderer.send('resize-pet-window', { width, height });
-    }
+    resizePetWindow: (width, height, anchorBottom = false) => {
+        ipcRenderer.send('resize-pet-window', { width, height, anchorBottom });
+    },
+    testDesktopAwareness: () => ipcRenderer.invoke('test-desktop-awareness'),
 });

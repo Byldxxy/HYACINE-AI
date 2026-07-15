@@ -12,7 +12,7 @@ export default function TestTab({
                 icon={FlaskConical}
                 title="对话测试"
                 description="不经过 QQ，直接验证当前人设、记忆和模型配置。"
-                actions={<Button icon={Trash2} size="sm" variant="danger" onClick={clearTestChat}>清空会话</Button>}
+                actions={<Button icon={Trash2} variant="danger" onClick={clearTestChat}>清空会话</Button>}
             />
 
             <Section>

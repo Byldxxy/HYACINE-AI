@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 
 const CHARACTER_IMG = '/character.png';
 
-export default function CharacterDisplay({ hidden, characterMessage, config, setCharacterMessage, transition }) {
+export default function CharacterDisplay({ hidden, scale, characterMessage, config, setCharacterMessage, transition }) {
     const interactions = config.interactions || [];
     const [hasCharacterImage, setHasCharacterImage] = useState(true);
 
@@ -27,6 +27,10 @@ export default function CharacterDisplay({ hidden, characterMessage, config, set
                     src={CHARACTER_IMG}
                     alt={config.charName || '角色'}
                     className="character-image"
+                    style={{
+                        height: `${98 * scale}%`,
+                        maxHeight: `${1040 * scale}px`,
+                    }}
                     animate={{ y: [0, -9, 0] }}
                     transition={{ repeat: Infinity, duration: 4, ease: 'easeInOut' }}
                     onError={() => setHasCharacterImage(false)}

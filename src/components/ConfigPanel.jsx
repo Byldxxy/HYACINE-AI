@@ -1,15 +1,16 @@
 // components/ConfigPanel.jsx - 面板容器
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
-import { MessageSquare, Database, Cpu, Save, Heart, FlaskConical, Monitor, Terminal } from 'lucide-react';
+import { MessageSquare, Database, Cpu, Save, Heart, FlaskConical, Monitor, Terminal, Eye, EyeOff, Scaling } from 'lucide-react';
 
 // --- Hooks ---
 import { useConfig } from '../hooks/useConfig';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useDesktopPet } from '../hooks/useDesktopPet';
+import { useDesktopAwareness } from '../hooks/useDesktopAwareness';
 
 // --- Components ---
-import { Button, TabButton } from './UIComponents';
+import { Button, IconButton, TabButton } from './UIComponents';
 import CharacterDisplay from './CharacterDisplay';
 import LogTerminal from './LogTerminal';
 import ConnectTab from './tabs/ConnectTab';
@@ -19,15 +20,33 @@ import MemoryTab from './tabs/MemoryTab';
 import TestTab from './tabs/TestTab';
 import { apiUrl } from '../lib/api';
 
+const CHARACTER_VIEW_KEY = 'hyacine-character-view';
+const DEFAULT_CHARACTER_VIEW = { visible: true, scale: 1 };
+
+function loadCharacterView() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(CHARACTER_VIEW_KEY) || '{}');
+        const scale = Number(saved.scale);
+        return {
+            visible: saved.visible !== false,
+            scale: Number.isFinite(scale) ? Math.max(0.6, Math.min(1.2, scale)) : 1,
+        };
+    } catch {
+        return DEFAULT_CHARACTER_VIEW;
+    }
+}
+
 export default function ConfigPanel() {
     const [activeTab, setActiveTab] = useState('connect');
     const [characterMessage, setCharacterMessage] = useState("系统初始化...");
     const [logs, setLogs] = useState([]);
     const [isLogOpen, setIsLogOpen] = useState(false);
+    const [characterView, setCharacterView] = useState(loadCharacterView);
     const containerRef = useRef(null);
 
     const { config, loadConfig, handleChange, saveConfig } = useConfig();
     const desktopPet = useDesktopPet();
+    const desktopAwareness = useDesktopAwareness();
 
     // --- 记忆管理相关的 State ---
     const [sessionList, setSessionList] = useState([]);
@@ -65,6 +84,14 @@ export default function ConfigPanel() {
     }, [addLog]);
 
     useEffect(() => { loadConfig(); fetchAvatars(); }, [loadConfig, fetchAvatars]);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(CHARACTER_VIEW_KEY, JSON.stringify(characterView));
+        } catch {
+            // Keep the controls usable for this session when storage is unavailable.
+        }
+    }, [characterView]);
 
     // --- 记忆管理 ---
     const fetchSessionList = () => {
@@ -188,6 +215,7 @@ export default function ConfigPanel() {
     };
 
     const isPersonaTab = activeTab === 'persona';
+    const isCharacterHidden = isPersonaTab || !characterView.visible;
     const springTransition = { type: 'spring', stiffness: 520, damping: 48, mass: 1 };
 
     return (
@@ -196,7 +224,8 @@ export default function ConfigPanel() {
             <LayoutGroup>
                 <div className="app-stage">
                     <CharacterDisplay
-                        hidden={isPersonaTab}
+                        hidden={isCharacterHidden}
+                        scale={characterView.scale}
                         characterMessage={characterMessage}
                         config={config}
                         setCharacterMessage={setCharacterMessage}
@@ -206,7 +235,7 @@ export default function ConfigPanel() {
                     <motion.main
                         layout
                         transition={springTransition}
-                        className={`config-wrap ${isPersonaTab ? 'config-wrap-wide' : ''}`}
+                        className={`config-wrap ${isCharacterHidden ? 'config-wrap-wide' : ''}`}
                     >
                         <motion.div layout="position" className="glass-panel">
                             <nav className="panel-tabs">
@@ -219,7 +248,7 @@ export default function ConfigPanel() {
 
                             <div className="panel-content custom-scrollbar">
                                 <AnimatePresence mode="wait">
-                                    {activeTab === 'connect' && <ConnectTab key="connect" config={config} handleChange={handleChange} addKeyword={addKeyword} removeKeyword={removeKeyword} />}
+                                    {activeTab === 'connect' && <ConnectTab key="connect" config={config} handleChange={handleChange} addKeyword={addKeyword} removeKeyword={removeKeyword} desktopAwareness={desktopAwareness} />}
                                     {activeTab === 'ai' && <ModelTab key="ai" config={config} handleChange={handleChange} avatarList={avatarList} fetchAvatars={fetchAvatars} setCharacterMessage={setCharacterMessage} />}
                                     {activeTab === 'persona' && <PersonaTab key="persona" config={config} handleChange={handleChange} handleInteractionChange={handleInteractionChange} />}
                                     {activeTab === 'memory' && <MemoryTab key="memory" config={config} handleChange={handleChange} sessionList={sessionList} sessionSearch={sessionSearch} setSessionSearch={setSessionSearch} currentSessionId={currentSessionId} sessionMessages={sessionMessages} editingMsgIndex={editingMsgIndex} editBuffer={editBuffer} currentSummary={currentSummary} persistentMemoryList={persistentMemoryList} newPersistFact={newPersistFact} fetchSessionList={fetchSessionList} selectSession={selectSession} saveSummary={saveSummary} deleteSession={deleteSession} startEdit={startEdit} saveEdit={saveEdit} deleteMsg={deleteMsg} saveSessionChanges={saveSessionChanges} savePersistentMemory={savePersistentMemory} addPersistFact={addPersistFact} removePersistFact={removePersistFact} setNewPersistFact={setNewPersistFact} setCurrentSummary={setCurrentSummary} setEditBuffer={setEditBuffer} setEditingMsgIndex={setEditingMsgIndex} />}
@@ -229,6 +258,31 @@ export default function ConfigPanel() {
 
                             <footer className="panel-footer">
                                 <div className="flex items-center gap-2">
+                                    <div className="character-control" title={isPersonaTab ? '人设页面会自动隐藏看板娘' : 'Web 看板娘显示与尺寸'}>
+                                        <IconButton
+                                            icon={characterView.visible ? Eye : EyeOff}
+                                            label={characterView.visible ? '隐藏 Web 看板娘' : '显示 Web 看板娘'}
+                                            disabled={isPersonaTab}
+                                            onClick={() => setCharacterView(prev => ({ ...prev, visible: !prev.visible }))}
+                                        />
+                                        <label className="character-scale-control" title="调整 Web 看板娘立绘大小">
+                                            <Scaling aria-hidden="true" />
+                                            <input
+                                                type="range"
+                                                aria-label="Web 看板娘立绘大小"
+                                                min="0.6"
+                                                max="1.2"
+                                                step="0.05"
+                                                value={characterView.scale}
+                                                disabled={isPersonaTab || !characterView.visible}
+                                                onChange={(event) => setCharacterView(prev => ({
+                                                    ...prev,
+                                                    scale: Number(event.target.value),
+                                                }))}
+                                            />
+                                            <span>{Math.round(characterView.scale * 100)}%</span>
+                                        </label>
+                                    </div>
                                     <div
                                         className="pet-control"
                                         title={desktopPet.available ? '显示或隐藏 Electron 桌宠窗口' : '仅在 Electron 桌面版中可用'}

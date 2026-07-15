@@ -69,7 +69,7 @@ select:focus-visible {
   }
 
   .character-image {
-    @apply h-[98%] max-h-[1040px] w-auto max-w-none cursor-pointer object-contain drop-shadow-[0_24px_30px_rgba(190,80,130,0.2)] transition-transform duration-300 hover:scale-[1.025];
+    @apply w-auto max-w-none cursor-pointer object-contain drop-shadow-[0_24px_30px_rgba(190,80,130,0.2)] transition-transform duration-300 hover:scale-[1.025];
   }
 
   .speech-bubble {
@@ -116,6 +116,26 @@ select:focus-visible {
 
   .pet-control {
     @apply flex h-10 items-center gap-2 rounded-xl border border-pink-100 bg-white/70 px-3 text-xs font-medium text-pink-600 shadow-sm;
+  }
+
+  .character-control {
+    @apply hidden h-10 shrink-0 items-center gap-1 rounded-xl border border-pink-100 bg-white/70 px-1.5 shadow-sm md:flex;
+  }
+
+  .character-scale-control {
+    @apply flex h-8 min-w-0 items-center gap-1.5 px-1 text-pink-500;
+  }
+
+  .character-scale-control svg {
+    @apply h-4 w-4 shrink-0;
+  }
+
+  .character-scale-control input {
+    @apply h-2 w-16 cursor-pointer appearance-none rounded-full bg-pink-100 accent-pink-500 disabled:cursor-not-allowed disabled:opacity-40 xl:w-20;
+  }
+
+  .character-scale-control span {
+    @apply w-9 text-right text-[11px] font-bold tabular-nums text-pink-600;
   }
 
   .page-header {

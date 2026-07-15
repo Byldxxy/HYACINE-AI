@@ -1,129 +1,256 @@
-// src/pet/PetScene.jsx - Three.js MMD 桌宠场景
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
 import { MMDAnimationHelper } from 'three/examples/jsm/animation/MMDAnimationHelper.js';
 import { OutlineEffect } from 'three/examples/jsm/effects/OutlineEffect.js';
 import { API_BASE_URL } from '../lib/api';
+import { DEFAULT_PET_MANIFEST, loadPetManifest } from './config/petManifest';
+import { usePetEvents } from './hooks/usePetEvents';
+import { ExpressionController } from './runtime/ExpressionController';
+import { loadManifestMotions } from './runtime/loadMotions';
+import { LookAtController } from './runtime/LookAtController';
+import { inspectMmdModel } from './runtime/modelDiagnostics';
+import { MotionController } from './runtime/MotionController';
+import PetOverlay from './ui/PetOverlay';
 
-const MODEL_PATH = '/models/desktop-pet.pmx';
+const BASE_WIDTH = 250;
+const BASE_HEIGHT = 400;
+const MIN_SPEECH_HEADROOM = 64;
+const PET_SCALE_KEY = 'hyacine-pet-scale';
+
+function loadPetScale() {
+    try {
+        const value = Number(localStorage.getItem(PET_SCALE_KEY));
+        return Number.isFinite(value) && value >= 0.5 && value <= 2.5 ? value : 1;
+    } catch {
+        return 1;
+    }
+}
+
+function estimateSpeechHeadroom(text) {
+    const lines = Math.max(1, Math.ceil(String(text || '').length / 14));
+    return Math.min(200, Math.max(MIN_SPEECH_HEADROOM, 34 + lines * 21));
+}
+
+function loadModel(loader, path) {
+    return fetch(path, { method: 'HEAD' }).then(response => {
+        const contentType = response.headers.get('content-type') || '';
+        if (!response.ok || contentType.includes('text/html')) {
+            throw new Error(`未找到模型文件: ${path}`);
+        }
+        return new Promise((resolve, reject) => loader.load(path, resolve, undefined, reject));
+    });
+}
+
+function getHitRegion(mesh, point) {
+    const box = mesh.geometry.boundingBox;
+    if (!box) return 'body';
+    const localPoint = mesh.worldToLocal(point.clone());
+    const height = Math.max(0.001, box.max.y - box.min.y);
+    return (localPoint.y - box.min.y) / height >= 0.72 ? 'head' : 'body';
+}
+
+function disposeMesh(mesh) {
+    mesh.geometry?.dispose();
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.filter(Boolean).forEach(material => {
+        Object.values(material).forEach(value => {
+            if (value?.isTexture) value.dispose();
+        });
+        material.dispose();
+    });
+}
 
 export default function PetScene() {
     const mountRef = useRef(null);
     const sceneRef = useRef(null);
+    const speechTimerRef = useRef(null);
+    const petScaleDraftRef = useRef(loadPetScale());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [showMenu, setShowMenu] = useState(false);
     const [passthrough, setPassthrough] = useState(false);
-    const [petScale, setPetScale] = useState(1.0);
+    const [petScale, setPetScale] = useState(loadPetScale);
+    const [petScaleDraft, setPetScaleDraft] = useState(loadPetScale);
+    const [speech, setSpeech] = useState('');
+    const [speechHeadroom, setSpeechHeadroom] = useState(0);
 
-    const BASE_W = 250;
-    const BASE_H = 400;
+    const showSpeech = useCallback((text, duration) => {
+        const message = String(text || '').trim().slice(0, 180);
+        if (!message) return;
+        setSpeechHeadroom(estimateSpeechHeadroom(message));
+        setSpeech(message);
+        clearTimeout(speechTimerRef.current);
+        speechTimerRef.current = setTimeout(() => {
+            setSpeech('');
+            setSpeechHeadroom(0);
+        }, duration * 1000);
+    }, []);
 
-    const handleScaleChange = useCallback((e) => {
-        const val = parseFloat(e.target.value);
-        setPetScale(val);
-        if (window.electronAPI?.resizePetWindow) {
-            window.electronAPI.resizePetWindow(BASE_W * val, BASE_H * val);
+    const updateSpeechHeight = useCallback((height) => {
+        const nextHeight = Math.min(200, Math.max(MIN_SPEECH_HEADROOM, Math.ceil(Number(height) || 0)));
+        setSpeechHeadroom(previous => Math.abs(previous - nextHeight) > 1 ? nextHeight : previous);
+    }, []);
+
+    const triggerDefinition = useCallback((definition, kind = 'event', detail = {}) => {
+        const state = sceneRef.current;
+        if (!state || !definition) return;
+        if (definition.motion) {
+            state.motionController?.play(definition.motion, {
+                kind,
+                priority: definition.priority,
+                cooldown: definition.cooldown,
+                duration: detail.duration,
+            });
+        }
+        if (definition.expression) {
+            state.expressionController?.play(definition.expression, {
+                duration: Number(detail.duration) || Number(definition.duration) || 1.2,
+            });
         }
     }, []);
 
-    // 监听穿透模式变化
+    const handlePetEvent = useCallback((event, detail) => {
+        const state = sceneRef.current;
+        const definition = event === 'desktopComment'
+            ? state?.manifest?.events?.desktopComment || state?.manifest?.events?.speaking
+            : state?.manifest?.events?.[event];
+        triggerDefinition(definition, event === 'error' ? 'system' : 'event', detail);
+        if (event === 'speaking' || event === 'desktopComment') {
+            state?.expressionController?.speak(Number(detail.duration) || 1.5);
+        }
+        if (event === 'desktopComment' && detail.text) {
+            const duration = Math.max(4, Math.min(12, Number(detail.duration) || 6));
+            showSpeech(detail.text, duration);
+        }
+    }, [showSpeech, triggerDefinition]);
+
+    usePetEvents(handlePetEvent);
+
     useEffect(() => {
-        if (window.electronAPI?.onPassthroughChanged) {
-            window.electronAPI.onPassthroughChanged((val) => setPassthrough(val));
+        try {
+            localStorage.setItem(PET_SCALE_KEY, String(petScale));
+        } catch {
+            // Keep the current size when storage is unavailable.
         }
+        window.electronAPI?.resizePetWindow?.(
+            BASE_WIDTH * petScale,
+            BASE_HEIGHT * petScale + speechHeadroom,
+            true
+        );
+    }, [petScale, speechHeadroom]);
+
+    useEffect(() => {
+        const unsubscribe = window.electronAPI?.onPassthroughChanged?.(setPassthrough);
+        return () => unsubscribe?.();
     }, []);
 
-    // ============ 交互事件（React 合成事件） ============
-    const handleMouseMove = useCallback((e) => {
-        const s = sceneRef.current;
-        if (!s) return;
-        const rect = e.currentTarget.getBoundingClientRect();
-        s.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        s.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    useEffect(() => {
+        const unsubscribe = window.electronAPI?.onGlobalCursorMoved?.(({ x, y, windowBounds }) => {
+            const state = sceneRef.current;
+            const container = mountRef.current;
+            if (!state || !container || !windowBounds) return;
+            const rect = container.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return;
+            const localX = x - windowBounds.x - rect.left;
+            const localY = y - windowBounds.y - rect.top;
+            const normalizedX = (localX / rect.width) * 2 - 1;
+            const normalizedY = (localY / rect.height) * 2 - 1;
+            state.lookAtController?.setTarget(normalizedX, normalizedY);
+        });
+        return () => unsubscribe?.();
+    }, []);
 
-        s.targetHeadRotY = s.mouse.x * 0.45;
-        s.targetHeadRotX = s.mouse.y * 0.2;
+    useEffect(() => () => clearTimeout(speechTimerRef.current), []);
 
-        if (s.isDragging && window.electronAPI) {
-            window.electronAPI.dragMove(e.screenX, e.screenY);
+    const updatePetScaleDraft = useCallback((event) => {
+        const nextScale = Number(event.target.value);
+        petScaleDraftRef.current = nextScale;
+        setPetScaleDraft(nextScale);
+    }, []);
+
+    const commitPetScale = useCallback(() => {
+        setPetScale(petScaleDraftRef.current);
+    }, []);
+
+    const testDesktopAwareness = useCallback(async () => {
+        const result = await window.electronAPI?.testDesktopAwareness?.();
+        const message = result?.ok
+            ? '我看看。'
+            : result?.message || '桌面感知仅在 Electron 桌宠模式下可用';
+        showSpeech(message, result?.ok ? 2.5 : 3.5);
+    }, [showSpeech]);
+
+    const handleMouseMove = useCallback((event) => {
+        const state = sceneRef.current;
+        if (!state) return;
+        const rect = mountRef.current?.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return;
+        state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+        if (state.isDragging && window.electronAPI) {
+            window.electronAPI.dragMove(event.screenX, event.screenY);
             return;
         }
 
-        s.raycaster.setFromCamera(s.mouse, s.camera);
-        if (s.model && !s.isDragging) {
-            const intersects = s.raycaster.intersectObject(s.model, true);
-            const wasHovering = s.isHovering;
-            s.isHovering = intersects.length > 0;
-            if (s.isHovering !== wasHovering) {
-                e.currentTarget.style.cursor = s.isHovering ? 'pointer' : 'grab';
-            }
-        }
+        state.raycaster.setFromCamera(state.mouse, state.camera);
+        const intersection = state.model
+            ? state.raycaster.intersectObject(state.model, true)[0]
+            : null;
+        state.isHovering = Boolean(intersection);
+        state.hoverRegion = intersection ? getHitRegion(state.model, intersection.point) : null;
+        event.currentTarget.style.cursor = state.isHovering ? 'pointer' : 'grab';
     }, []);
 
-    const handleMouseDown = useCallback((e) => {
-        // 【修复1】只要是鼠标左键按下（不论点在空白还是模型上），立刻关闭右键菜单
-        // 这样可以防止被原生的 dragStart 劫持导致 click 无法触发
-        if (e.button === 0) {
-            setShowMenu(false);
-        }
-
-        const s = sceneRef.current;
-        if (!s || e.button !== 0) return;
-        
-        if (!s.isHovering) {
-            s.isDragging = true;
-            e.currentTarget.style.cursor = 'grabbing';
-            if (window.electronAPI) {
-                window.electronAPI.dragStart(e.screenX, e.screenY);
-            }
-        }
+    const handleMouseDown = useCallback((event) => {
+        if (event.button !== 0) return;
+        setShowMenu(false);
+        const state = sceneRef.current;
+        if (!state || state.isHovering) return;
+        state.isDragging = true;
+        event.currentTarget.style.cursor = 'grabbing';
+        window.electronAPI?.dragStart?.(event.screenX, event.screenY);
     }, []);
 
-    const handleMouseUp = useCallback(() => {
-        const s = sceneRef.current;
-        if (!s) return;
-        if (s.isDragging) {
-            s.isDragging = false;
-            if (window.electronAPI) {
-                window.electronAPI.dragEnd();
-            }
-        }
-    }, []);
-
-    const handleContextMenu = useCallback((e) => {
-        e.preventDefault();
-        // 【修复2】明确设为 true，而非 prev => !prev，避免左右键快速切换时状态错乱
-        setShowMenu(true); 
+    const endDrag = useCallback(() => {
+        const state = sceneRef.current;
+        if (!state?.isDragging) return;
+        state.isDragging = false;
+        window.electronAPI?.dragEnd?.();
     }, []);
 
     const handleClick = useCallback(() => {
-        // 兜底的点击关闭（对于不触发拖拽的情况）
         setShowMenu(false);
+        const state = sceneRef.current;
+        if (!state?.isHovering || !state.hoverRegion) return;
+        triggerDefinition(state.manifest?.interactions?.[state.hoverRegion], 'reaction');
+    }, [triggerDefinition]);
+
+    const openConfig = useCallback(() => {
+        if (window.electronAPI?.openConfig) window.electronAPI.openConfig();
+        else window.open(API_BASE_URL);
     }, []);
 
-    const handleDblClick = useCallback(() => {
-        if (window.electronAPI) {
-            window.electronAPI.openConfig();
-        }
-    }, []);
-
-    // ============ Three.js 初始化（仅渲染，不含交互事件） ============
     useEffect(() => {
         const container = mountRef.current;
-        if (!container) return;
+        if (!container) return undefined;
 
+        let disposed = false;
+        let animationFrame;
+        let helper = null;
+        let mesh = null;
         const scene = new THREE.Scene();
         scene.background = null;
-
-        const camera = new THREE.PerspectiveCamera(
-            30, container.clientWidth / container.clientHeight, 0.1, 200
-        );
+        const camera = new THREE.PerspectiveCamera(30, container.clientWidth / container.clientHeight, 0.1, 200);
         camera.position.set(0, 10, 55);
         camera.lookAt(0, 10, 0);
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        const renderer = new THREE.WebGLRenderer({
+            antialias: true,
+            alpha: true,
+            preserveDrawingBuffer: import.meta.env.DEV,
+        });
         renderer.setSize(container.clientWidth, container.clientHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.setClearColor(0x000000, 0);
@@ -136,271 +263,195 @@ export default function PetScene() {
             defaultColor: [0.2, 0.15, 0.15],
             defaultAlpha: 0.8,
         });
-
-        // 找到你刚刚改过的那两盏灯，替换成下面这样：
-
-        // 1. 环境光：直接拉高到 1.2（或者 1.5），这是消灭死灰色的主力军
-        const ambientLight = new THREE.AmbientLight(0xffffff, 1.2); 
-        scene.add(ambientLight);
-
-        // 2. 主方向光：增强到 1.0，稍微拉高拉远一点，让脸部受光更均匀
-        const mainLight = new THREE.DirectionalLight(0xffffff, 1.0);
-        mainLight.position.set(2, 5, 8); // 从右前上方打光
+        scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+        const mainLight = new THREE.DirectionalLight(0xffffff, 1);
+        mainLight.position.set(2, 5, 8);
         scene.add(mainLight);
-        
 
-        const state = {
+        const runtime = {
             model: null,
-            mouse: new THREE.Vector2(0, 0),
-            targetHeadRotY: 0, targetHeadRotX: 0,
-            currentHeadRotY: 0, currentHeadRotX: 0,
-            isHovering: false,
-            isDragging: false,
-            time: 0,
-            helper: null,
-            blinkTimer: 0, blinkState: 0,
-            nextBlink: 3 + Math.random() * 4,
+            manifest: DEFAULT_PET_MANIFEST,
+            mouse: new THREE.Vector2(),
             camera,
             raycaster: new THREE.Raycaster(),
+            isHovering: false,
+            isDragging: false,
+            hoverRegion: null,
+            helper: null,
+            motionController: null,
+            expressionController: null,
+            lookAtController: null,
+            time: 0,
         };
-        sceneRef.current = state;
+        sceneRef.current = runtime;
 
-        let helper = null;
-        let hasPhysics = false;
-        const initHelper = async () => {
+        const initialize = async () => {
+            let manifestResult;
+            try {
+                manifestResult = await loadPetManifest();
+            } catch (manifestError) {
+                console.warn('[Pet] Manifest load failed, using defaults:', manifestError.message);
+                manifestResult = { manifest: DEFAULT_PET_MANIFEST, source: 'default' };
+            }
+            runtime.manifest = manifestResult.manifest;
+            console.info(`[Pet] Manifest source: ${manifestResult.source}`);
+
+            let hasPhysics = false;
             try {
                 if (typeof window.Ammo === 'function') {
-                    const ammo = await window.Ammo();
-                    helper = new MMDAnimationHelper({ afterglow: 2.0, ammo });
-                    hasPhysics = true;
-                } else { throw new Error('Ammo not found'); }
-            } catch (_e) {
-                helper = new MMDAnimationHelper({ afterglow: 2.0 });
+                    window.Ammo = await window.Ammo();
+                }
+                hasPhysics = Boolean(window.Ammo?.btDiscreteDynamicsWorld);
+            } catch (physicsError) {
+                console.warn('[Pet] Ammo initialization failed:', physicsError.message);
             }
-            state.helper = helper;
-            return helper;
+            helper = new MMDAnimationHelper({ afterglow: 2, sync: false });
+            runtime.helper = helper;
+
+            const loader = new MMDLoader();
+            mesh = await loadModel(loader, runtime.manifest.model);
+            if (disposed) { disposeMesh(mesh); return; }
+            runtime.model = mesh;
+            mesh.scale.setScalar(1.2);
+            mesh.geometry.computeBoundingBox();
+            scene.add(mesh);
+
+            const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+            materials.filter(Boolean).forEach(material => {
+                if (!material.isMeshToonMaterial) return;
+                material.alphaToCoverage = true;
+                material.depthWrite = true;
+                material.color.multiplyScalar(1.3);
+                material.emissive = material.color.clone();
+                material.emissiveIntensity = 0.6;
+            });
+
+            const { motions, errors: motionErrors } = await loadManifestMotions(loader, mesh, runtime.manifest.motions);
+            if (disposed) return;
+            motionErrors.forEach(item => console.warn(`[Pet] Motion failed: ${item.name} (${item.file})`, item.message));
+            const clips = Object.values(motions).map(item => item.clip);
+            helper.add(mesh, {
+                animation: clips.length > 0 ? clips : undefined,
+                physics: hasPhysics,
+            });
+
+            runtime.motionController = new MotionController({ helper, mesh, motions });
+            runtime.expressionController = new ExpressionController(mesh, runtime.manifest.expressions);
+            runtime.lookAtController = new LookAtController(mesh, runtime.manifest.bones);
+            runtime.capabilities = inspectMmdModel(mesh, runtime.manifest, hasPhysics);
+            runtime.motionController.play('idle', { force: true, loop: true });
+            setLoading(false);
         };
 
-        const loader = new MMDLoader();
-        const loadModel = (path) => new Promise((resolve, reject) => {
-            loader.load(path, resolve, undefined, reject);
-        });
-
-        initHelper().then((h) => {
-            helper = h;
-            loadModel(MODEL_PATH).then((mesh) => {
-                state.model = mesh;
-                mesh.scale.set(1.2, 1.2, 1.2);
-                scene.add(mesh);
-                if (Array.isArray(mesh.material)) {
-                    mesh.material.forEach(mat => { 
-                        if (mat.isMeshToonMaterial) {
-                            mat.alphaToCoverage = true; 
-                            mat.depthWrite = true;
-                            
-                            // 1. 【核心突破】直接把材质的基础颜色/贴图亮度放大 1.3 倍（觉得不够可以改成 1.5）
-                            // 这能强行洗掉由于模型本身导出的“内嵌暗色”
-                            mat.color.multiplyScalar(1.3); 
-                            
-                            // 2. 【强力自发光】将自发光颜色设为放大后的颜色
-                            mat.emissive = mat.color.clone(); 
-                            
-                            // 3. 【打破限制】直接把自发光强度拉到 0.6 或 0.8（最高可以去到 1.5+）
-                            // 自发光越高，背光面的灰色阴影就会越少，人就会越白皙通透
-                            mat.emissiveIntensity = 0.6; 
-                        }
-                    });
-                }
-                helper.add(mesh, { animation: [], physics: hasPhysics });
+        initialize().catch(initializationError => {
+            console.error('[Pet] Initialization failed:', initializationError);
+            if (!disposed) {
+                setError(`模型加载失败: ${initializationError.message || initializationError}`);
                 setLoading(false);
-            }).catch((err) => {
-                setError('模型加载失败: ' + (err.message || err));
-                setLoading(false);
-            });
+            }
         });
 
         const onResize = () => {
-            const w = container.clientWidth, h = container.clientHeight;
-            camera.aspect = w / h;
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            camera.aspect = width / height;
             camera.updateProjectionMatrix();
-            renderer.setSize(w, h);
+            renderer.setSize(width, height);
         };
         window.addEventListener('resize', onResize);
 
-        let animFrameId;
         const clock = new THREE.Clock();
-        const animate = () => {
-            animFrameId = requestAnimationFrame(animate);
-            const delta = clock.getDelta();
-            state.time += delta;
-
-            if (state.model) {
-                state.model.position.y = Math.sin(state.time * 1.5) * 0.15;
-                state.model.rotation.y = Math.sin(state.time * 0.5) * 0.03;
-                state.model.rotation.z = Math.sin(state.time * 0.7) * 0.01;
-
-                state.currentHeadRotY += (state.targetHeadRotY - state.currentHeadRotY) * 3 * delta;
-                state.currentHeadRotX += (state.targetHeadRotX - state.currentHeadRotX) * 3 * delta;
-
-                const skeleton = state.model.skeleton;
-                if (skeleton) {
-                    const headBone = skeleton.bones.find(b => b.name === '頭' || b.name === 'Head' || b.name.includes('頭'));
-                    if (headBone) { headBone.rotation.y = state.currentHeadRotY; headBone.rotation.x = state.currentHeadRotX; }
-
-                    skeleton.bones.filter(b => b.name === '両目' || b.name === 'Eyes' || b.name.includes('目'))
-                        .forEach(bone => { bone.rotation.y = state.currentHeadRotY * 0.5; bone.rotation.x = state.currentHeadRotX * 0.5; });
-
-                    state.blinkTimer += delta;
-                    if (state.blinkState === 0 && state.blinkTimer >= state.nextBlink) { state.blinkState = 1; state.blinkTimer = 0; }
-                    const morphDict = state.model.morphTargetDictionary;
-                    if (morphDict && (morphDict['まばたき'] !== undefined || morphDict['blink'] !== undefined)) {
-                        const blinkIdx = morphDict['まばたき'] ?? morphDict['blink'];
-                        let blinkVal = 0;
-                        if (state.blinkState === 1) { blinkVal = Math.min(state.blinkTimer / 0.05, 1); if (blinkVal >= 1) { state.blinkState = 2; state.blinkTimer = 0; } }
-                        else if (state.blinkState === 2) { blinkVal = 1; if (state.blinkTimer >= 0.05) { state.blinkState = 3; state.blinkTimer = 0; } }
-                        else if (state.blinkState === 3) { blinkVal = 1 - Math.min(state.blinkTimer / 0.08, 1); if (blinkVal <= 0) { state.blinkState = 0; state.blinkTimer = 0; state.nextBlink = 2 + Math.random() * 5; } }
-                        state.model.morphTargetInfluences[blinkIdx] = blinkVal;
-                    }
+        if (import.meta.env.DEV) {
+            window.__HYACINE_PET_DIAGNOSTICS__ = () => {
+                const gl = renderer.getContext();
+                const width = renderer.domElement.width;
+                const height = renderer.domElement.height;
+                const pixels = new Uint8Array(width * height * 4);
+                gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                let nonTransparentPixels = 0;
+                for (let index = 3; index < pixels.length; index += 4) {
+                    if (pixels[index] > 8) nonTransparentPixels += 1;
                 }
-            }
+                return {
+                    canvas: { width, height },
+                    nonTransparentPixels,
+                    coverage: nonTransparentPixels / Math.max(1, width * height),
+                    modelLoaded: Boolean(runtime.model),
+                    motion: runtime.motionController?.state || 'loading',
+                    expressions: runtime.expressionController?.snapshot() || null,
+                    capabilities: runtime.capabilities || null,
+                };
+            };
+        }
+        const animate = () => {
+            animationFrame = requestAnimationFrame(animate);
+            const delta = Math.min(clock.getDelta(), 0.05);
+            if (document.hidden) return;
+            runtime.time += delta;
 
-            if (state.helper) state.helper.update(delta);
+            runtime.lookAtController?.beforeAnimation();
+            runtime.helper?.update(delta);
+
+            if (runtime.model && !runtime.motionController?.has('idle')) {
+                runtime.model.position.y = Math.sin(runtime.time * 1.5) * 0.15;
+                runtime.model.rotation.y = Math.sin(runtime.time * 0.5) * 0.03;
+                runtime.model.rotation.z = Math.sin(runtime.time * 0.7) * 0.01;
+            }
+            runtime.expressionController?.update(delta);
+            runtime.lookAtController?.update(delta);
             outlineEffect.render(scene, camera);
         };
         animate();
 
         return () => {
-            cancelAnimationFrame(animFrameId);
+            disposed = true;
+            cancelAnimationFrame(animationFrame);
             window.removeEventListener('resize', onResize);
+            runtime.motionController?.dispose();
+            runtime.expressionController?.dispose();
+            runtime.lookAtController?.dispose();
+            if (mesh && helper?.meshes.includes(mesh)) helper.remove(mesh);
+            if (mesh) {
+                scene.remove(mesh);
+                disposeMesh(mesh);
+            }
+            renderer.renderLists.dispose();
             renderer.dispose();
+            renderer.forceContextLoss();
             if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
+            if (sceneRef.current === runtime) sceneRef.current = null;
+            if (window.__HYACINE_PET_DIAGNOSTICS__) delete window.__HYACINE_PET_DIAGNOSTICS__;
         };
     }, []);
 
-    // ============ JSX：Three.js 画布 + UI 层平级 ============
     return (
         <div
+            className={`pet-root ${speechHeadroom > 0 ? 'pet-root-with-speech' : ''}`}
+            style={{ '--pet-speech-headroom': `${speechHeadroom}px` }}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onContextMenu={handleContextMenu}
+            onMouseUp={endDrag}
+            onMouseLeave={endDrag}
+            onContextMenu={(event) => { event.preventDefault(); setShowMenu(true); }}
             onClick={handleClick}
-            onDoubleClick={handleDblClick}
-            style={{ width: '100%', height: '100%', background: 'transparent', position: 'relative' }}
+            onDoubleClick={openConfig}
         >
-            <div ref={mountRef} style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }} />
-
-            {loading && (
-                <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', color: '#ff69b4', fontSize: '14px', fontFamily: 'sans-serif', textShadow: '0 0 10px rgba(255,105,180,0.5)', zIndex: 500 }}>
-                    ✨ 加载中...
-                </div>
-            )}
-
-            {error && (
-                <div style={{ position: 'absolute', top: '10px', left: '10px', right: '10px', color: '#ff4444', fontSize: '12px', fontFamily: 'monospace', background: 'rgba(0,0,0,0.7)', padding: '8px', borderRadius: '4px', zIndex: 500 }}>
-                    {error}
-                </div>
-            )}
-
-            {showMenu && (
-                <div
-                    onClick={(e) => e.stopPropagation()}
-                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                    onMouseDown={(e) => e.stopPropagation()}
-                    style={{
-                        position: 'absolute', top: '50%', left: '50%',
-                        transform: 'translate(-50%, -50%)',
-                        background: 'rgba(255,255,255,0.95)',
-                        backdropFilter: 'blur(10px)',
-                        borderRadius: '12px', padding: '4px',
-                        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                        minWidth: '180px', zIndex: 1000,
-                        fontFamily: 'sans-serif',
-                    }}
-                >
-                    <div
-                        style={{ padding: '10px 16px', cursor: 'pointer', fontSize: '13px', color: '#333', borderRadius: '8px' }}
-                        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,105,180,0.1)'}
-                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                        onClick={() => {
-                            setShowMenu(false);
-                            if (window.electronAPI) {
-                                window.electronAPI.openConfig();
-                            } else {
-                                window.open(API_BASE_URL);
-                            }
-                        }}
-                    >
-                        🔧 打开配置面板
-                    </div>
-
-                    <div
-                        style={{ padding: '10px 16px', cursor: 'pointer', fontSize: '13px', color: '#333', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
-                        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,105,180,0.1)'}
-                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                        onClick={() => {
-                            setShowMenu(false);
-                            if (window.electronAPI) {
-                                window.electronAPI.togglePassthrough();
-                            }
-                        }}
-                    >
-                        <span>🔓 穿透模式</span>
-                        <span style={{
-                            display: 'inline-block', width: '16px', height: '16px',
-                            borderRadius: '3px', border: '2px solid #999',
-                            background: passthrough ? '#ff69b4' : 'transparent',
-                            textAlign: 'center', lineHeight: '14px', fontSize: '12px',
-                            color: '#fff', marginLeft: '8px',
-                        }}>
-                            {passthrough ? '✓' : ''}
-                        </span>
-                    </div>
-                </div>
-            )}
-
-            {/* 缩放控件 */}
-            <div
-                onClick={(e) => e.stopPropagation()}
-                onMouseDown={(e) => e.stopPropagation()}
-                onContextMenu={(e) => e.stopPropagation()}
-                style={{
-                    position: 'absolute',
-                    bottom: '8px',
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    background: 'rgba(0,0,0,0.45)',
-                    backdropFilter: 'blur(6px)',
-                    borderRadius: '12px',
-                    padding: '4px 10px',
-                    zIndex: 800,
-                    fontFamily: 'sans-serif',
-                    userSelect: 'none',
-                }}
-            >
-                <span style={{ color: '#fff', fontSize: '11px', opacity: 0.8 }}>−</span>
-                <input
-                    type="range"
-                    min="0.5"
-                    max="2.5"
-                    step="0.1"
-                    value={petScale}
-                    onChange={handleScaleChange}
-                    style={{
-                        width: '80px',
-                        height: '4px',
-                        cursor: 'pointer',
-                        accentColor: '#ff69b4',
-                    }}
-                />
-                <span style={{ color: '#fff', fontSize: '11px', opacity: 0.8 }}>+</span>
-                <span style={{ color: '#ff69b4', fontSize: '10px', minWidth: '28px', textAlign: 'right' }}>
-                    {Math.round(petScale * 100)}%
-                </span>
-            </div>
+            <div ref={mountRef} className="pet-canvas" />
+            <PetOverlay
+                loading={loading}
+                error={error}
+                speech={speech}
+                showMenu={showMenu}
+                passthrough={passthrough}
+                petScale={petScaleDraft}
+                onCloseMenu={() => setShowMenu(false)}
+                onOpenConfig={openConfig}
+                onTogglePassthrough={() => window.electronAPI?.togglePassthrough?.()}
+                onScaleChange={updatePetScaleDraft}
+                onScaleCommit={commitPetScale}
+                onSpeechHeightChange={updateSpeechHeight}
+                onTestDesktopAwareness={testDesktopAwareness}
+            />
         </div>
     );
 }

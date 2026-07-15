@@ -16,6 +16,8 @@
 ## 功能
 
 - AI 对话：兼容 OpenAI Chat Completions 格式，可配置 API Endpoint、文本模型、温度和回复长度。
+- 图片理解：@ 机器人或使用句首唤醒词发送图片时，将图片交给支持视觉输入的文本模型理解并回复。
+- 聊天参考生图：正常聊天触发生图且消息附带图片时，本地角色图作为基底，聊天图片作为姿势、构图、场景或风格参考。
 - AI 生图：支持普通生图和挂载角色参考图的生图流程。
 - 直连生图：`/img`、`/draw` 可跳过文本模型，直接调用生图接口。
 - 触发机制：支持 @ 机器人、自定义唤醒词、全量回复模式。
@@ -25,6 +27,7 @@
 - 实时日志：前端通过 WebSocket 接收后端日志。
 - 桌宠模式：Electron 启动后端并显示可拖拽 MMD 桌宠。
 - 桌宠开关：Electron 模式下可从管理面板顶部或托盘菜单显示/隐藏桌宠窗口。
+- 桌面感知：可选观察主显示器画面，在画面变化后由桌宠自主决定是否搭话。
 
 ## 快速开始
 
@@ -100,6 +103,38 @@ public/
 
 MMD 模型引用的贴图、材质和其他依赖文件也应放入 `public/models/`，并保持模型内部使用的相对路径。缺少 `character.png` 时管理面板会隐藏人物图片；缺少 `tray_icon.png` 时 Electron 会跳过托盘创建；缺少模型时桌宠页面会显示加载错误。
 
+默认模型地址是 `/models/desktop-pet.pmx`。需要使用其他文件名或目录时，在本地 `.env` 中设置相对于 `public/` 的 URL，例如：
+
+```env
+VITE_PET_MODEL_PATH=/models/my-pet.pmx
+```
+
+修改 `VITE_PET_MODEL_PATH` 后需要重启 Vite 或 `npm run dev:pet`。
+
+如果默认的 Vite `5173` 端口已被占用，可在本地环境中设置 `VITE_DEV_SERVER_URL`，让 Electron 连接到另一个开发服务器地址。
+
+### 桌宠动作配置
+
+桌宠动作采用 MMD VMD 文件。仓库只提供 `public/pet-manifest.example.json` 配置示例，不包含模型、动作或声音素材。准备好有权使用的动作文件后：
+
+1. 将示例复制为本地 `public/pet-manifest.json`。
+2. 将 VMD 文件放入模型资源目录，例如 `public/models/motions/`。
+3. 在 manifest 的 `motions` 中填写动作 URL。
+4. 在本地 `.env` 设置 `VITE_PET_MANIFEST_PATH=/pet-manifest.json`。
+5. 重启 Vite 或 Electron。
+
+manifest 支持以下能力：
+
+- `motions`：动作文件、循环、优先级、淡入淡出、速度和冷却。
+- `bones`：不同模型的头部和眼睛骨骼名映射。
+- `expressions`：眨眼、微笑、生气、惊讶、悲伤等 Morph 名映射。
+- `interactions`：点击头部或身体时触发的动作与表情。
+- `events`：机器人注意、思考、说话、生图、主动发言和错误状态对应的动作。
+
+动作控制器会在非循环动作结束后自动返回 `idle`。缺少动作或单个 VMD 加载失败时不会阻止模型显示，而是继续使用无动作降级待机。模型加载后，开发者控制台会输出骨骼、Morph、材质和物理能力报告，便于填写 manifest。
+
+`speaking` 事件会按回复长度驱动 `mouthOpen` Morph 做基础口型。后续接入 TTS 时，可以在保留事件与动作状态机的前提下改用音频振幅驱动。
+
 请勿使用、分发或提交你无权使用的模型、图片、贴图、动作、音频或其他素材。
 
 ```bash
@@ -141,6 +176,10 @@ HYACINE-AI/
 │   ├── components/             # React 配置面板组件
 │   ├── hooks/                  # 配置与 WebSocket Hook
 │   ├── pet/                    # Three.js 桌宠入口
+│   │   ├── config/             # Manifest 加载与默认语义映射
+│   │   ├── hooks/              # 桌宠 WebSocket 事件
+│   │   ├── runtime/            # 动作、表情、注视与模型诊断
+│   │   └── ui/                 # 桌宠覆盖层控件
 │   ├── App.jsx
 │   └── main.jsx
 ├── server.js                   # Express + WebSocket 后端入口
@@ -171,8 +210,26 @@ HYACINE-AI/
 | `proactiveInterval` | 主动发言检查间隔，秒 |
 | `proactiveCooldown` | 同一群主动发言冷却，秒 |
 | `proactiveThreshold` | 主动发言最低置信度 |
+| `proactiveContextSize` | 主动发言判断使用的最近群消息条数，范围 `3-50` |
 | `proactiveTargetGroups` | 指定主动发言群号；为空表示全部群 |
+| `enableDesktopAwareness` | 启用 Electron 桌面感知；默认关闭 |
+| `desktopAwarenessInterval` | 桌面视觉分析最短间隔，范围 `30-900` 秒 |
+| `desktopAwarenessCooldown` | 两次桌面互动之间的冷却，范围 `60-3600` 秒 |
+| `desktopAwarenessMaxTokens` | 桌面视觉回复最大输出 Token，范围 `256-10000`，默认 `4000` |
+| `desktopAwarenessChangeThreshold` | 截图上传前的本地画面变化阈值，范围 `0.02-0.5` |
+| `desktopAwarenessExcludedTerms` | 截图前排除的前台应用名、进程名或包标识关键词 |
+| `desktopAwarenessHidePetFromCapture` | 截图时隐藏桌宠内容；可从托盘菜单切换，默认开启 |
 | `currentPersonaFileName` | 生图参考图文件名 |
+
+### 图片理解
+
+图片理解沿用普通消息的触发规则：群聊中需要 @ 机器人、使用句首唤醒词，或开启全量回复；私聊图片会直接处理。文本模型必须支持 OpenAI Chat Completions 的多模态 `image_url` 输入格式。
+
+- 支持 OneBot 结构化图片消息和 `[CQ:image,...]` 消息。
+- 单条消息最多读取 3 张图片，每张最大 6 MB，下载超时为 15 秒。
+- 图片仅用于当前模型请求；会话 JSON 只保存图片数量占位，不保存图片 Base64。
+- 如果所配置的文本模型不支持视觉输入，模型 API 会返回错误，需要在面板中换用视觉模型。
+- 正常聊天触发生图时，当前消息的图片会继续传给生图模型；本地选中的角色图保持主角身份，聊天图片不会覆盖角色基底。
 
 ## QQ 管理指令
 
@@ -194,8 +251,26 @@ HYACINE-AI/
 ## 管理面板 UI
 
 - 页面保留粉色二次元毛玻璃、看板娘和气泡视觉，使用顶部标签导航与统一内容区布局。
+- 面板底部可隐藏 Web 看板娘或调整立绘大小；偏好保存在当前浏览器，隐藏后配置面板自动居中。
 - 输入框、文本框、按钮、图标按钮、开关、滑块和分区由 `src/components/UIComponents.jsx` 统一维护。
 - 桌宠开关调用 `/api/desktop-pet`，仅 Electron 子进程模式可以控制桌宠窗口。
+- 桌宠通过独立 WebSocket 事件响应注意、思考、回复、生图、主动发言和错误状态。
+- 桌面互动通过气泡展示，并复用桌宠的 `speaking` 动作与口型。
+
+### 桌面感知
+
+桌面感知仅在 Electron 桌宠模式下可用，并且默认关闭。可在“连接与触发 -> 桌面感知”中开启。macOS 首次开启时需要在系统设置中授予屏幕录制权限。
+
+- 每 5 秒只在本地检查一次前台应用和低清画面变化，不因此调用模型。
+- 截取主显示器画面，避免依赖不同应用的窗口标题和窗口源格式。
+- 前台应用识别失败、用户空闲超过 60 秒或应用命中隐私排除关键词时直接跳过。
+- 截图压缩为最高约 `960x540` 的 JPEG，只驻留内存，不写入配置、日志或会话记录。
+- 屏幕内容始终作为不可信观察数据，网页或应用内文字不会被当作系统指令执行。
+- 托盘菜单中的“桌面感知”复选项会直接启用或停用已保存配置。
+- 托盘菜单中的“截图中隐藏桌宠”可切换内容保护；关闭后允许桌宠结合自身与桌面内容互动。
+- 隐藏桌宠窗口时会立即停止画面采集；重新显示后恢复观察。
+
+默认最短分析间隔为 120 秒，互动冷却为 300 秒。只有画面相对上次分析出现明显变化，并且视觉模型给出的互动分数达到阈值时，桌宠才显示气泡。按默认值，理论上每小时最多分析约 30 次；实际次数通常会因画面变化、冷却、空闲检测和隐私排除进一步降低。
 
 ## 常用命令
 

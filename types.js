@@ -32,7 +32,15 @@
  * @property {number} proactiveInterval - 主动发言检查间隔 (秒)
  * @property {number} proactiveCooldown - 主动发言冷却时间 (秒)
  * @property {number} proactiveThreshold - 主动发言置信度阈值
+ * @property {number} proactiveContextSize - 主动发言判断使用的最近群消息条数
  * @property {string[]} proactiveTargetGroups - 目标群号列表
+ * @property {boolean} enableDesktopAwareness - 启用 Electron 桌面感知
+ * @property {number} desktopAwarenessInterval - 桌面视觉分析最短间隔 (秒)
+ * @property {number} desktopAwarenessCooldown - 桌面互动发言冷却 (秒)
+ * @property {number} desktopAwarenessMaxTokens - 桌面视觉回复最大输出 Token
+ * @property {number} desktopAwarenessChangeThreshold - 本地画面变化阈值
+ * @property {string[]} desktopAwarenessExcludedTerms - 截图前排除的前台应用关键词
+ * @property {boolean} desktopAwarenessHidePetFromCapture - 截图时隐藏桌宠窗口
  * @property {string} currentPersonaId - 当前角色 ID
  * @property {string} currentPersonaFileName - 当前角色图片文件名
  */
