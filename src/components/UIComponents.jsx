@@ -1,3 +1,9 @@
+/**
+ * 管理面板的基础控件集合。
+ *
+ * tabs 应优先复用这些组件，以保持 label、hint、开关可访问性、按钮图标和 CSS 类一致。
+ * 这些组件保持无业务状态：值和事件均由 ConfigPanel/useConfig 向下传递。
+ */
 import React from 'react';
 import { motion } from 'framer-motion';
 

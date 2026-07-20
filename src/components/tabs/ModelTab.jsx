@@ -1,3 +1,9 @@
+/**
+ * 文本/视觉/生图模型配置页。
+ *
+ * API Key 显示值可能是后端返回的脱敏占位符，保存逻辑会保留真实值。角色参考图列表来自
+ * data/avatars，它用于生图身份基底，不是 Electron PMX 模型或 Web 看板娘图片。
+ */
 import React from 'react';
 import { Image as ImageIcon, MessageSquare, RefreshCw } from 'lucide-react';
 import {

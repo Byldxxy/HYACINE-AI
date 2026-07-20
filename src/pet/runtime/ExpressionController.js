@@ -1,3 +1,10 @@
+/**
+ * MMD Morph 表情控制器。
+ *
+ * manifest 使用 smile/blink 等语义名，本类在初始化时解析为模型实际 morph 索引。
+ * targets 负责普通表情的平滑趋近，眨眼和说话口型是每帧生成的临时权重；缺少某个
+ * Morph 时对应能力返回 false，但不会阻止模型和其他表情运行。
+ */
 function resolveMorphIndex(mesh, candidates = []) {
     const dictionary = mesh.morphTargetDictionary || {};
     const name = candidates.find(candidate => dictionary[candidate] !== undefined);
@@ -31,6 +38,7 @@ export class ExpressionController {
     play(name, { weight = 1, duration = 1.2 } = {}) {
         const index = this.indices[name];
         if (index === null || index === undefined) return false;
+        // 同一表情再次触发时重置归零计时器，而不是叠加多个 timeout。
         this.targets.set(index, weight);
         clearTimeout(this.timers.get(index));
         this.timers.set(index, setTimeout(() => this.targets.set(index, 0), duration * 1000));
@@ -38,6 +46,7 @@ export class ExpressionController {
     }
 
     updateBlink(delta) {
+        // 状态 0/1/2/3 分别代表等待、闭眼、短暂停留、睁眼。
         const index = this.indices.blink;
         if (index === null || index === undefined) return;
         this.blinkTimer += delta;
@@ -73,6 +82,7 @@ export class ExpressionController {
         const mouthIndex = this.indices.mouthOpen;
         if (mouthIndex !== null && mouthIndex !== undefined) {
             this.speechTime += delta;
+            // 当前没有音频振幅数据，用正弦变化模拟基础口型；未来接 TTS 可替换 target 来源。
             const target = performance.now() < this.speakingUntil
                 ? 0.15 + Math.abs(Math.sin(this.speechTime * 11)) * 0.55
                 : 0;

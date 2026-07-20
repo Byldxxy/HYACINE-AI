@@ -1,5 +1,11 @@
+/**
+ * 连接与触发配置页。
+ *
+ * 管理 OneBot 连接、群聊触发、主动发言和桌面感知参数。desktopAwareness 是只读运行状态，
+ * config 是尚未保存的表单草稿；更改参数后仍需点击面板底部“保存所有配置”。
+ */
 import React from 'react';
-import { Activity, Cpu, Plus, ScanEye, ShieldCheck, X } from 'lucide-react';
+import { Activity, Cpu, Download, Plus, ScanEye, ShieldCheck, X } from 'lucide-react';
 import {
     Button,
     IconButton,
@@ -10,6 +16,7 @@ import {
     TabContent,
     Toggle,
 } from '../UIComponents';
+import { apiUrl } from '../../lib/api';
 
 const DESKTOP_STATUS = {
     loading: ['正在读取状态', 'bg-gray-100 text-gray-500'],
@@ -36,12 +43,32 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
     const [desktopStatusLabel, desktopStatusClass] = DESKTOP_STATUS[desktopAwareness?.status]
         || DESKTOP_STATUS.unavailable;
 
+    const downloadDiagnostics = async () => {
+        try {
+            const response = await fetch(apiUrl('/api/diagnostics'));
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const report = await response.json();
+            const blobUrl = URL.createObjectURL(new Blob(
+                [`${JSON.stringify(report, null, 2)}\n`],
+                { type: 'application/json' }
+            ));
+            const link = document.createElement('a');
+            link.href = blobUrl;
+            link.download = `hyacine-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+            link.click();
+            URL.revokeObjectURL(blobUrl);
+        } catch (error) {
+            console.error('导出诊断失败:', error);
+        }
+    };
+
     return (
         <TabContent>
             <PageHeader
                 icon={Cpu}
                 title="连接与触发"
                 description="设置 OneBot 连接、消息唤醒方式和主动发言策略。"
+                actions={<Button icon={Download} onClick={downloadDiagnostics}>导出诊断</Button>}
             />
 
             <Section title="连接信息" description="NapCat 使用反向 WebSocket 连接到机器人后端。">
@@ -195,7 +222,7 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
 
                     {config.enableDesktopAwareness && (
                         <>
-                            <div className="grid gap-4 border-t border-gray-100 pt-4 md:grid-cols-2 xl:grid-cols-4">
+                            <div className="grid gap-4 border-t border-gray-100 pt-4 md:grid-cols-2 xl:grid-cols-5">
                                 <RangeField
                                     label="分析间隔"
                                     value={config.desktopAwarenessInterval}
@@ -222,6 +249,15 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                                     max="10000"
                                     step="256"
                                     onChange={(e) => handleChange('desktopAwarenessMaxTokens', Number(e.target.value))}
+                                />
+                                <RangeField
+                                    label="气泡字符上限"
+                                    value={config.desktopAwarenessMaxReplyLength}
+                                    suffix=" 字"
+                                    min="80"
+                                    max="800"
+                                    step="20"
+                                    onChange={(e) => handleChange('desktopAwarenessMaxReplyLength', Number(e.target.value))}
                                 />
                                 <RangeField
                                     label="画面变化阈值"

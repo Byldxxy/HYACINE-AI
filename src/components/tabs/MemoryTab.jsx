@@ -1,3 +1,9 @@
+/**
+ * 记忆查看与人工编辑页。
+ *
+ * 近期会话、长期摘要和持久化事实分别对应三个后端数据源。编辑消息和摘要使用本地副本，
+ * 需点击各自保存按钮；删除会话和持久化事实的最终保存路径由 ConfigPanel 编排。
+ */
 import React, { useMemo } from 'react';
 import {
     BookOpen,

@@ -10,6 +10,7 @@ const {
     isExcludedWindow,
     normalizeDesktopAwarenessConfig,
     parseDesktopDecision,
+    truncateDesktopReply,
     validateFrame,
 } = require('../lib/desktop-awareness');
 
@@ -19,6 +20,7 @@ test('normalizes desktop awareness defaults and clamps expensive settings', () =
     assert.equal(defaults.intervalSeconds, 120);
     assert.equal(defaults.cooldownSeconds, 300);
     assert.equal(defaults.maxTokens, 4000);
+    assert.equal(defaults.maxReplyChars, 300);
     assert.equal(defaults.hidePetFromCapture, true);
     assert.ok(defaults.excludedTerms.includes('password'));
 
@@ -30,11 +32,13 @@ test('normalizes desktop awareness defaults and clamps expensive settings', () =
         desktopAwarenessInterval: 1,
         desktopAwarenessCooldown: 99999,
         desktopAwarenessMaxTokens: 10_000,
+        desktopAwarenessMaxReplyLength: 9999,
         desktopAwarenessChangeThreshold: 1,
     });
     assert.equal(clamped.intervalSeconds, 30);
     assert.equal(clamped.cooldownSeconds, 3600);
     assert.equal(clamped.maxTokens, 10000);
+    assert.equal(clamped.maxReplyChars, 800);
     assert.equal(clamped.changeThreshold, 0.5);
 });
 
@@ -76,6 +80,12 @@ test('normalizes compatible completion content and supports direct desktop repli
         messageFields: ['content'],
         finishReason: 'length',
     });
+});
+
+test('truncates desktop replies at sentence boundaries instead of cutting clauses', () => {
+    assert.equal(truncateDesktopReply('第一句已经完整。第二句还没有说完而且很长。', 9), '第一句已经完整。');
+    assert.equal(truncateDesktopReply('这是一段完全没有句号而且超过限制的文本', 10), '这是一段完全没有句…');
+    assert.equal(extractDesktopReply('短句保持不变。', 10), '短句保持不变。');
 });
 
 test('builds a multimodal request that treats screen text as untrusted', () => {

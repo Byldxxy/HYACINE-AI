@@ -2,6 +2,8 @@
 
 > 此文件用于快速理解项目全貌和当前维护状态。
 
+工程优化的逐步变更记录见 [`OPTIMIZATION_LOG.md`](./OPTIMIZATION_LOG.md)。
+
 ## 项目概述
 
 可自定义人设与本地视觉资源的 QQ 群 AI 聊天机器人管理面板。
@@ -31,6 +33,7 @@ Electron 主显示器 + 前台应用 -> 本地变化/隐私筛选 -> lib/desktop
 | --- | --- |
 | `server.js` | 后端入口、API、WebSocket、依赖注入、主动发言定时器启动 |
 | `lib/message-handler.js` | QQ 消息触发、上下文构建、LLM 调用、生图拦截、分段发送 |
+| `lib/chat-completion.js` | QQ 与 WebUI 测试共用的提示词、记忆上下文和文本模型请求 |
 | `lib/memory.js` | 会话记忆、长期摘要、持久化事实 |
 | `lib/proactive.js` | 群聊观察、主动发言判断、主动发言定时器 |
 | `lib/desktop-awareness.js` | 桌面视觉分析、结构化决策、互动冷却与提示注入防护 |
@@ -96,10 +99,10 @@ Electron 主显示器 + 前台应用 -> 本地变化/隐私筛选 -> lib/desktop
 | `enableDesktopAwareness` | 已用，仅 Electron 模式可用，默认关闭 |
 | `desktopAwarenessInterval` / `desktopAwarenessCooldown` | 已用，控制视觉调用频率与互动冷却 |
 | `desktopAwarenessMaxTokens` | 已用，控制桌面视觉回复最大输出 Token |
+| `desktopAwarenessMaxReplyLength` | 已用，独立控制桌面气泡字符上限并按完整句子截取 |
 | `desktopAwarenessChangeThreshold` | 已用，控制本地画面变化门槛 |
 | `desktopAwarenessExcludedTerms` | 已用，在截图生成前排除敏感前台应用 |
 | `currentPersonaFileName` | 已用，生图参考图 |
-| `personaTags` | 未使用，原 SD Tags 遗留字段 |
 
 ## 近期已完成
 
@@ -120,11 +123,17 @@ Electron 主显示器 + 前台应用 -> 本地变化/隐私筛选 -> lib/desktop
 - 正常聊天触发生图时支持“本地角色基底图 + 当前聊天参考图”的多图输入与角色优先级约束。
 - 桌宠运行时拆分为 manifest、动作、表情、注视、事件和覆盖层模块，支持 VMD 状态机与无动作降级。
 - Electron 桌宠支持通用桌面感知、前台应用隐私过滤、本地画面变化筛选和主动互动气泡。
+- Electron Builder/NSIS Windows 安装链路、跨平台开发启动脚本与安装态 `userData` 路径已接通。
+- 修复开发态 Electron 错读系统 `userData` 导致配置看似清空的问题；源码模式继续使用项目 `data/`，安装态保持用户目录存储。
+- 配置和记忆已增加 Zod 校验、版本字段、串行原子写入和 `.bak` 恢复。
+- 聊天图片下载已增加 DNS/IP/重定向 SSRF 防护。
+- QQ 聊天与 WebUI 测试聊天已共用提示词、记忆上下文和文本模型请求模块。
+- GitHub Actions 已覆盖 Windows/macOS/Linux，后端集成测试和脱敏诊断导出已加入。
 
 ## 后续建议
 
 - 为管理 API 增加可选本地 token。
-- 为配置和记忆 API 增加 schema 校验。
-- 将 JSON 写入改为临时文件 + rename 的原子写入。
+- 将 Electron 中通过 WebUI 输入的 API Key 迁移到系统安全存储。
 - 为 `smartSplit`、主动发言 JSON 解析、记忆摘要触发补单元测试。
 - Three.js 暂固定为 `0.170.0`；升级前需将已弃用的 `MMDAnimationHelper` 迁移到后续维护方案。
+- 在真实 Windows 环境完成 NSIS 安装、升级、卸载及桌面感知烟测，并配置代码签名与正式图标。

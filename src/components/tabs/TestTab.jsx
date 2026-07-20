@@ -1,3 +1,9 @@
+/**
+ * 不经过 NapCat 的模型测试页。
+ *
+ * 请求仍使用当前已保存的后端配置，并写入独立 test_default 会话。切换主人/普通用户
+ * 用于验证关系提示词，不会伪造真实 QQ 连接或向群聊发送消息。
+ */
 import React from 'react';
 import { FlaskConical, Send, Trash2 } from 'lucide-react';
 import { Button, PageHeader, Section, SelectField, TabContent } from '../UIComponents';

@@ -1,4 +1,10 @@
-// components/ConfigPanel.jsx - 面板容器
+/**
+ * 管理面板的状态编排容器。
+ *
+ * 各 tabs 主要负责展示，跨标签共享的配置、记忆编辑、测试对话、日志和桌宠状态集中在
+ * 这里。配置表单是“编辑草稿”，只有点击保存才写入后端；记忆管理接口则按操作立即保存。
+ * Web 看板娘只是管理面板装饰，与 Electron 桌宠是两套独立显示和状态。
+ */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
 import { MessageSquare, Database, Cpu, Save, Heart, FlaskConical, Monitor, Terminal, Eye, EyeOff, Scaling } from 'lucide-react';
@@ -24,6 +30,7 @@ const CHARACTER_VIEW_KEY = 'hyacine-character-view';
 const DEFAULT_CHARACTER_VIEW = { visible: true, scale: 1 };
 
 function loadCharacterView() {
+    // 看板娘显隐/缩放属于当前浏览器偏好，不属于机器人配置，也不会同步给其他设备。
     try {
         const saved = JSON.parse(localStorage.getItem(CHARACTER_VIEW_KEY) || '{}');
         const scale = Number(saved.scale);
@@ -49,6 +56,7 @@ export default function ConfigPanel() {
     const desktopAwareness = useDesktopAwareness();
 
     // --- 记忆管理相关的 State ---
+    // sessionMessages 是当前选中会话的编辑副本，saveSessionChanges 后才覆盖后端数据。
     const [sessionList, setSessionList] = useState([]);
     const [currentSessionId, setCurrentSessionId] = useState(null);
     const [sessionMessages, setSessionMessages] = useState([]);
@@ -60,6 +68,7 @@ export default function ConfigPanel() {
     const [sessionSearch, setSessionSearch] = useState("");
 
     // --- 测试对话相关 State ---
+    // 测试接口使用独立 test_default session，不会混入真实 QQ 群/私聊 session。
     const [testMessages, setTestMessages] = useState([]);
     const [testInput, setTestInput] = useState("");
     const [testIsMaster, setTestIsMaster] = useState(true);
@@ -69,13 +78,14 @@ export default function ConfigPanel() {
     const [avatarList, setAvatarList] = useState([]);
 
     const addLog = useCallback((level, content, time) => {
+        // UI 只保留最近 101 条，完整运行日志仍以终端输出为准。
         setLogs(prev => [...prev.slice(-100), { level, content, time }]);
     }, []);
 
     // WebSocket 连接
     useWebSocket(addLog, setCharacterMessage);
 
-    // 初始化加载
+    // 初始化只读取配置与角色参考图；记忆列表在切到记忆页后再按需加载。
     const fetchAvatars = useCallback(() => {
         fetch(apiUrl('/api/avatars'))
             .then(res => res.json())
@@ -211,6 +221,7 @@ export default function ConfigPanel() {
     };
 
     const handleSave = () => {
+        // tabs 对 config 的修改都在同一个对象中，底部按钮一次提交完整配置快照。
         saveConfig(addLog, () => setCharacterMessage("我焕然一新啦！✨"));
     };
 

@@ -38,6 +38,7 @@
  * @property {number} desktopAwarenessInterval - 桌面视觉分析最短间隔 (秒)
  * @property {number} desktopAwarenessCooldown - 桌面互动发言冷却 (秒)
  * @property {number} desktopAwarenessMaxTokens - 桌面视觉回复最大输出 Token
+ * @property {number} desktopAwarenessMaxReplyLength - 桌面气泡回复最大字符数
  * @property {number} desktopAwarenessChangeThreshold - 本地画面变化阈值
  * @property {string[]} desktopAwarenessExcludedTerms - 截图前排除的前台应用关键词
  * @property {boolean} desktopAwarenessHidePetFromCapture - 截图时隐藏桌宠窗口

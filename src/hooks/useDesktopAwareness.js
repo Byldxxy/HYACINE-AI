@@ -1,3 +1,9 @@
+/**
+ * 轮询桌面感知的跨进程聚合状态。
+ *
+ * WebUI 不直接连接 Electron；它每 5 秒向 server.js 查询，由后端合并 Electron observer
+ * 和模型 engine 的状态。普通浏览器模式会稳定返回 unavailable，而不是抛出功能错误。
+ */
 import { useCallback, useEffect, useState } from 'react';
 import { apiUrl } from '../lib/api';
 

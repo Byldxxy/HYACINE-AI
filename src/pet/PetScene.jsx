@@ -1,3 +1,11 @@
+/**
+ * 桌宠渲染进程的主场景。
+ *
+ * 本组件把 React UI、Three.js/MMD 运行时和 Electron preload API 组合在一起：React state
+ * 管理气泡/菜单/尺寸，sceneRef 保存不应触发重渲染的逐帧对象，WebSocket 语义事件再通过
+ * manifest 映射为动作与表情。文件较长是因为浏览器事件和 WebGL 生命周期必须共享同一
+ * 模型实例；可复用算法已拆到 runtime/ 和 ui/ 子模块。
+ */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
@@ -16,9 +24,12 @@ import PetOverlay from './ui/PetOverlay';
 const BASE_WIDTH = 250;
 const BASE_HEIGHT = 400;
 const MIN_SPEECH_HEADROOM = 64;
+const MAX_SPEECH_HEADROOM = 500;
+const MAX_RENDERED_SPEECH_LENGTH = 1000;
 const PET_SCALE_KEY = 'hyacine-pet-scale';
 
 function loadPetScale() {
+    // localStorage 属于 renderer；原生窗口尺寸由后续 effect 通过 preload 同步。
     try {
         const value = Number(localStorage.getItem(PET_SCALE_KEY));
         return Number.isFinite(value) && value >= 0.5 && value <= 2.5 ? value : 1;
@@ -28,11 +39,13 @@ function loadPetScale() {
 }
 
 function estimateSpeechHeadroom(text) {
+    // 首次 render 前没有 DOM 高度，先估算以立即扩窗；PetOverlay 随后回传实测值校正。
     const lines = Math.max(1, Math.ceil(String(text || '').length / 14));
-    return Math.min(200, Math.max(MIN_SPEECH_HEADROOM, 34 + lines * 21));
+    return Math.min(MAX_SPEECH_HEADROOM, Math.max(MIN_SPEECH_HEADROOM, 34 + lines * 21));
 }
 
 function loadModel(loader, path) {
+    // Vite 对不存在的静态路径可能返回 HTML fallback，HEAD 检查可给出明确的资源错误。
     return fetch(path, { method: 'HEAD' }).then(response => {
         const contentType = response.headers.get('content-type') || '';
         if (!response.ok || contentType.includes('text/html')) {
@@ -43,6 +56,7 @@ function loadModel(loader, path) {
 }
 
 function getHitRegion(mesh, point) {
+    // 当前交互区域按模型包围盒高度粗分，避免要求每个模型额外提供碰撞骨骼配置。
     const box = mesh.geometry.boundingBox;
     if (!box) return 'body';
     const localPoint = mesh.worldToLocal(point.clone());
@@ -51,6 +65,7 @@ function getHitRegion(mesh, point) {
 }
 
 function disposeMesh(mesh) {
+    // Three.js 不会自动释放 GPU 纹理/几何体；热更新或组件重挂载时必须显式回收。
     mesh.geometry?.dispose();
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     materials.filter(Boolean).forEach(material => {
@@ -62,6 +77,7 @@ function disposeMesh(mesh) {
 }
 
 export default function PetScene() {
+    // React state 用于 DOM 展示；Three.js 对象放在 ref 中，避免 60 FPS 更新触发 React render。
     const mountRef = useRef(null);
     const sceneRef = useRef(null);
     const speechTimerRef = useRef(null);
@@ -76,7 +92,8 @@ export default function PetScene() {
     const [speechHeadroom, setSpeechHeadroom] = useState(0);
 
     const showSpeech = useCallback((text, duration) => {
-        const message = String(text || '').trim().slice(0, 180);
+        // 气泡文本在 UI 边界再次限长，防止异常事件无限扩大透明原生窗口。
+        const message = String(text || '').trim().slice(0, MAX_RENDERED_SPEECH_LENGTH);
         if (!message) return;
         setSpeechHeadroom(estimateSpeechHeadroom(message));
         setSpeech(message);
@@ -88,11 +105,12 @@ export default function PetScene() {
     }, []);
 
     const updateSpeechHeight = useCallback((height) => {
-        const nextHeight = Math.min(200, Math.max(MIN_SPEECH_HEADROOM, Math.ceil(Number(height) || 0)));
+        const nextHeight = Math.min(MAX_SPEECH_HEADROOM, Math.max(MIN_SPEECH_HEADROOM, Math.ceil(Number(height) || 0)));
         setSpeechHeadroom(previous => Math.abs(previous - nextHeight) > 1 ? nextHeight : previous);
     }, []);
 
     const triggerDefinition = useCallback((definition, kind = 'event', detail = {}) => {
+        // definition 来自 manifest；动作和表情互相独立，缺少其一时另一项仍可执行。
         const state = sceneRef.current;
         if (!state || !definition) return;
         if (definition.motion) {
@@ -111,6 +129,8 @@ export default function PetScene() {
     }, []);
 
     const handlePetEvent = useCallback((event, detail) => {
+        // 后端只发 attention/desktopComment 等语义，不知道具体 VMD/Morph 名称。
+        // desktopComment 缺少专用映射时回退 speaking，保持旧 manifest 兼容。
         const state = sceneRef.current;
         const definition = event === 'desktopComment'
             ? state?.manifest?.events?.desktopComment || state?.manifest?.events?.speaking
@@ -133,6 +153,7 @@ export default function PetScene() {
         } catch {
             // Keep the current size when storage is unavailable.
         }
+        // 高度包含 speechHeadroom，并要求主进程固定底边，角色脚部不会随气泡上下跳动。
         window.electronAPI?.resizePetWindow?.(
             BASE_WIDTH * petScale,
             BASE_HEIGHT * petScale + speechHeadroom,
@@ -164,12 +185,14 @@ export default function PetScene() {
     useEffect(() => () => clearTimeout(speechTimerRef.current), []);
 
     const updatePetScaleDraft = useCallback((event) => {
+        // 拖动滑块只更新 DOM 预览值，不立即缩放原生窗口；否则滑块会随窗口移动而失去指针。
         const nextScale = Number(event.target.value);
         petScaleDraftRef.current = nextScale;
         setPetScaleDraft(nextScale);
     }, []);
 
     const commitPetScale = useCallback(() => {
+        // pointer up / blur / keyboard commit 时一次性调整窗口和 WebGL 画布。
         setPetScale(petScaleDraftRef.current);
     }, []);
 
@@ -190,10 +213,12 @@ export default function PetScene() {
         state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
         if (state.isDragging && window.electronAPI) {
+            // 原生无边框窗口不能依赖系统标题栏拖动，通过 preload 把屏幕坐标交给主进程。
             window.electronAPI.dragMove(event.screenX, event.screenY);
             return;
         }
 
+        // Raycaster 决定本次按下是模型点击互动还是空白区域拖动窗口。
         state.raycaster.setFromCamera(state.mouse, state.camera);
         const intersection = state.model
             ? state.raycaster.intersectObject(state.model, true)[0]
@@ -236,6 +261,7 @@ export default function PetScene() {
         const container = mountRef.current;
         if (!container) return undefined;
 
+        // disposed 防止异步模型/VMD 在组件卸载后继续写入场景。
         let disposed = false;
         let animationFrame;
         let helper = null;
@@ -249,6 +275,7 @@ export default function PetScene() {
         const renderer = new THREE.WebGLRenderer({
             antialias: true,
             alpha: true,
+            // 仅开发环境保留帧缓冲，供像素诊断函数读取；生产关闭可降低 GPU 内存压力。
             preserveDrawingBuffer: import.meta.env.DEV,
         });
         renderer.setSize(container.clientWidth, container.clientHeight);
@@ -268,6 +295,7 @@ export default function PetScene() {
         mainLight.position.set(2, 5, 8);
         scene.add(mainLight);
 
+        // runtime 是渲染循环、DOM 事件和 WebSocket 回调共享的可变状态容器。
         const runtime = {
             model: null,
             manifest: DEFAULT_PET_MANIFEST,
@@ -286,6 +314,8 @@ export default function PetScene() {
         sceneRef.current = runtime;
 
         const initialize = async () => {
+            // 初始化顺序不可随意调整：manifest 决定模型路径和映射；模型加载后才能加载
+            // 绑定到该 mesh 的 VMD；全部 clip 注册到 helper 后 MotionController 才能取 mixer。
             let manifestResult;
             try {
                 manifestResult = await loadPetManifest();
@@ -326,6 +356,7 @@ export default function PetScene() {
                 material.emissiveIntensity = 0.6;
             });
 
+            // 动作属于可选能力，部分加载失败只记录诊断，不让整个模型初始化失败。
             const { motions, errors: motionErrors } = await loadManifestMotions(loader, mesh, runtime.manifest.motions);
             if (disposed) return;
             motionErrors.forEach(item => console.warn(`[Pet] Motion failed: ${item.name} (${item.file})`, item.message));
@@ -362,6 +393,7 @@ export default function PetScene() {
 
         const clock = new THREE.Clock();
         if (import.meta.env.DEV) {
+            // Playwright/开发者可调用此函数确认透明 canvas 不是“成功初始化但实际全空”。
             window.__HYACINE_PET_DIAGNOSTICS__ = () => {
                 const gl = renderer.getContext();
                 const width = renderer.domElement.width;
@@ -389,6 +421,8 @@ export default function PetScene() {
             if (document.hidden) return;
             runtime.time += delta;
 
+            // 顺序很重要：撤销上一帧视线 -> VMD/物理更新 -> fallback 待机 -> Morph ->
+            // 重新叠加视线 -> 渲染。交换顺序会导致头部偏移累积或被动作覆盖。
             runtime.lookAtController?.beforeAnimation();
             runtime.helper?.update(delta);
 
@@ -404,6 +438,8 @@ export default function PetScene() {
         animate();
 
         return () => {
+            // React StrictMode、Vite HMR 和窗口关闭都会执行 cleanup；释放 timer、mixer、
+            // GPU 资源和 WebGL context，避免重载后出现重复动画或 SharedImage 警告累积。
             disposed = true;
             cancelAnimationFrame(animationFrame);
             window.removeEventListener('resize', onResize);

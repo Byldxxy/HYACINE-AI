@@ -1,9 +1,11 @@
+/** Web 管理面板入口。桌宠使用独立的 src/pet/main.jsx，不会挂载此组件树。 */
 import { StrictMode, Component } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 
 class ErrorBoundary extends Component {
+  // 避免单个配置组件异常后留下空白页；这里只提供刷新恢复，不吞掉控制台错误。
   constructor(props) {
     super(props);
     this.state = { hasError: false, error: null };

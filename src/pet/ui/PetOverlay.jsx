@@ -1,3 +1,9 @@
+/**
+ * 桌宠 WebGL 画布上方的纯 DOM 覆盖层。
+ *
+ * 加载/错误、动态气泡、右键菜单和缩放条放在这里，避免把 UI 状态混入 Three.js 场景。
+ * 气泡实测高度会回传 PetScene，再由 Electron 从底边锚定扩展原生窗口。
+ */
 import React, { useLayoutEffect, useRef } from 'react';
 import { FlaskConical, LockKeyhole, Minus, Plus, Settings } from 'lucide-react';
 
@@ -21,6 +27,7 @@ export default function PetOverlay({
     const speechRef = useRef(null);
 
     useLayoutEffect(() => {
+        // useLayoutEffect 在浏览器绘制前测量，减少气泡先跳一次再稳定的视觉抖动。
         if (!speech || !speechRef.current) return;
         onSpeechHeightChange?.(Math.ceil(speechRef.current.getBoundingClientRect().height) + 16);
     }, [onSpeechHeightChange, petScale, speech]);

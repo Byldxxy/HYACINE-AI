@@ -1,3 +1,10 @@
+/**
+ * Electron 侧的桌面观察器。
+ *
+ * 本模块只负责读取前台应用、截取主显示器的低清缩略图，并判断画面是否值得分析。
+ * 它不调用大模型：满足条件的帧通过 sendFrame 交给 main.js，再经子进程 IPC 发送到
+ * lib/desktop-awareness.js。隐私排除、空闲检测和画面去重因此都在本地完成，不消耗 Token。
+ */
 const { desktopCapturer, powerMonitor, screen, systemPreferences } = require('electron');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
@@ -8,6 +15,7 @@ const {
 
 const execFileAsync = promisify(execFile);
 const SCAN_INTERVAL_MS = 5000;
+// 该尺寸是视觉可读性、隐私暴露面和请求体大小之间的折中；发送前还会压缩为 JPEG。
 const CAPTURE_SIZE = { width: 960, height: 540 };
 
 function createAccessibilityError() {
@@ -31,6 +39,8 @@ end tell`;
 }
 
 async function getMacActiveWindow() {
+    // 优先用 CoreGraphics 同时取得窗口标题和原生 windowId。标题缺失时再回退到
+    // System Events；回退路径需要辅助功能权限，而仅获取前台应用名通常不需要。
     const script = `ObjC.import('AppKit');
 ObjC.import('CoreGraphics');
 const app = $.NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -83,6 +93,8 @@ JSON.stringify({
 }
 
 async function getWindowsActiveWindow() {
+    // PowerShell 内嵌少量 Win32 调用，避免为一个前台窗口查询引入原生 Node 依赖。
+    // 返回字段与 macOS 结果对齐，后续隐私规则无需按平台分支。
     const script = `Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -110,6 +122,7 @@ $process = Get-Process -Id $pidValue -ErrorAction Stop
 }
 
 async function getLinuxActiveWindow() {
+    // Linux 当前依赖系统安装的 xdotool；Wayland 环境可能需要增加独立实现。
     const { stdout: title } = await execFileAsync('xdotool', ['getactivewindow', 'getwindowname'], { timeout: 3000 });
     return { title: title.trim(), ownerName: '' };
 }
@@ -154,6 +167,8 @@ function getTitleMatchScore(sourceName, windowInfo) {
 }
 
 function selectWindowSource(sources, windowInfo) {
+    // 旧版“当前窗口截图”保留此匹配器供测试和未来扩展使用。匹配顺序从可靠到宽松：
+    // 原生 ID -> 完整标题 -> 包含关系 -> 应用名 -> 标题 token 相似度。
     const title = normalizeSourceName(windowInfo?.title);
     const owner = normalizeSourceName(windowInfo?.ownerName);
     const windowId = Number(windowInfo?.windowId);
@@ -182,10 +197,12 @@ function selectWindowSource(sources, windowInfo) {
 }
 
 function selectPrimaryDisplaySource(sources, primaryDisplayId = String(screen.getPrimaryDisplay().id)) {
+    // 当前产品策略是捕获整个主显示器，以规避不同平台窗口源名称不一致的问题。
     return sources.find(source => String(source.display_id) === String(primaryDisplayId)) || sources[0] || null;
 }
 
 function createFrameSignature(image) {
+    // 将画面缩成 16x9 灰度签名。它不是内容识别，只用于低成本估算两帧变化比例。
     const bitmap = image.resize({ width: 16, height: 9, quality: 'good' }).toBitmap();
     const signature = [];
     for (let index = 0; index < bitmap.length; index += 4) {
@@ -201,6 +218,8 @@ function compareSignatures(previous, current) {
 }
 
 function createDesktopObserver({ sendFrame, onStatus }) {
+    // paused 是用户临时暂停；suspended 表示桌宠被隐藏。二者必须分开保存，
+    // 否则重新显示桌宠会意外覆盖用户主动选择的暂停状态。
     let settings = normalizeDesktopAwarenessConfig();
     let paused = false;
     let suspended = false;
@@ -220,12 +239,15 @@ function createDesktopObserver({ sendFrame, onStatus }) {
             detail,
         };
         const key = JSON.stringify(payload);
+        // 5 秒轮询会反复得到同一状态；去重可避免托盘重建和 IPC 日志刷屏。
         if (key === lastStatusKey) return;
         lastStatusKey = key;
         onStatus?.(payload);
     }
 
     async function scan({ force = false } = {}) {
+        // 所有高成本操作之前先执行状态、空闲和隐私门禁。force 仅绕过空闲/变化/间隔，
+        // 不绕过“功能未启用”和“桌宠已隐藏”，以保持用户开关的语义。
         if (!settings.enabled) {
             reportStatus('disabled');
             return { ok: false, message: '请先启用桌面感知' };
@@ -281,12 +303,14 @@ function createDesktopObserver({ sendFrame, onStatus }) {
             const activityChanged = activityKey !== lastActivityKey;
             const intervalElapsed = Date.now() - lastSentAt >= settings.intervalSeconds * 1000;
 
+            // 常规采样需要同时满足最短间隔，并且应用变化或画面变化达到阈值。
             if (!force && (!intervalElapsed || (!activityChanged && difference < settings.changeThreshold))) {
                 reportStatus('watching');
                 return { ok: false, message: '当前画面没有达到分析条件' };
             }
 
             const dataUrl = `data:image/jpeg;base64,${source.thumbnail.toJPEG(55).toString('base64')}`;
+            // 截图只以 data URL 驻留内存，不写入 data/、日志或会话文件。
             sendFrame({
                 dataUrl,
                 capturedAt: Date.now(),
@@ -328,6 +352,7 @@ function createDesktopObserver({ sendFrame, onStatus }) {
         const wasEnabled = settings.enabled;
         settings = normalizeDesktopAwarenessConfig(config);
         if (!settings.enabled) {
+            // 关闭后清除视觉基线，避免下次启用时与很久以前的截图做差分。
             paused = false;
             lastSignature = null;
             lastActivityKey = '';

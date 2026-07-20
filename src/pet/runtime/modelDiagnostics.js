@@ -1,3 +1,9 @@
+/**
+ * 输出 MMD 模型能力报告。
+ *
+ * 不同模型的骨骼、Morph 和物理能力差异很大。报告用于开发者控制台诊断 manifest
+ * 候选名称是否命中，不修改模型，也不把完整模型信息发送到后端。
+ */
 function findFirstName(availableNames, candidates = []) {
     return candidates.find(candidate => availableNames.includes(candidate)) || null;
 }

@@ -1,3 +1,9 @@
+/**
+ * 并行加载 manifest 中声明的 VMD 文件。
+ *
+ * 使用 Promise.allSettled 是有意的降级策略：某个动作缺失时返回 errors 供控制台诊断，
+ * 其他成功动作仍可使用，模型本身也不会因为可选动作失败而无法显示。
+ */
 function loadAnimation(loader, file, mesh) {
     return new Promise((resolve, reject) => {
         loader.loadAnimation(file, mesh, resolve, undefined, reject);

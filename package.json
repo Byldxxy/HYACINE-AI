@@ -1,24 +1,71 @@
 {
   "name": "hyacine-ai",
   "private": true,
-  "version": "1.1.0",
-  "main": "server.js",
+  "version": "1.2.0",
+  "description": "OpenAI-compatible QQ bot management panel with an Electron MMD desktop pet",
+  "author": "HYACINE-AI contributors",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "main": "electron/main.js",
   "bin": "server.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
     "test": "node --test test/*.test.js",
+    "check:release": "node scripts/check-release-boundary.js",
     "preview": "vite preview",
-    "build:exe": "pkg . -t node18-win-x64 --out-path build",
-    "dev:pet": "vite & sleep 3 && electron electron/main.js",
-    "electron:dev": "NODE_ENV=development electron electron/main.js"
+    "dev:pet": "node scripts/dev-pet.js",
+    "electron:dev": "electron electron/main.js",
+    "pack:dir": "npm run build && electron-builder --dir",
+    "dist:win": "npm run build && electron-builder --win nsis --x64"
   },
-  "pkg": {
-    "scripts": "dist/**/*.js",
-    "targets": [
-      "node18-win-x64"
-    ]
+  "build": {
+    "appId": "ai.hyacine.desktop",
+    "productName": "HYACINE-AI",
+    "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "lib/**/*",
+      "server.js",
+      "types.js",
+      "package.json",
+      "!**/*.test.js",
+      "!**/.env*",
+      "!data/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "public",
+        "to": "public",
+        "filter": [
+          "ammo.wasm.js",
+          "ammo.wasm.wasm",
+          "pet-manifest.example.json",
+          "pet-manifest.json",
+          "character.*",
+          "tray_icon.*",
+          "models/**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -29,7 +76,8 @@
     "openai": "^6.9.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -38,11 +86,11 @@
     "@vitejs/plugin-react": "^5.1.1",
     "autoprefixer": "^10.4.22",
     "electron": "^43.1.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
-    "pkg": "^5.8.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
     "three": "0.170.0",

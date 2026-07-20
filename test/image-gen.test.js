@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildImageGenerationContent } = require('../lib/image-gen');
+const { buildImageGenerationContent, generateImage } = require('../lib/image-gen');
 
 test('labels the local image as base and chat images as references', () => {
     const content = buildImageGenerationContent(
@@ -25,4 +25,15 @@ test('keeps text-only generation behavior when no images are available', () => {
     assert.deepEqual(buildImageGenerationContent('一片花海'), [
         { type: 'text', text: '请画一幅图：一片花海。请直接返回图片链接。' },
     ]);
+});
+
+test('requires explicit image provider and model configuration', async () => {
+    await assert.rejects(
+        generateImage({ apiKey: 'key', imageModel: 'image-model' }, 'scene'),
+        /生图 API Endpoint/
+    );
+    await assert.rejects(
+        generateImage({ apiEndpoint: 'https://example.com/v1', apiKey: 'key' }, 'scene'),
+        /生图模型/
+    );
 });

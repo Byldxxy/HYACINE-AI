@@ -45,6 +45,8 @@
   font-size: 12px;
   font-weight: 600;
   line-height: 1.55;
+  /* 气泡高度由内容撑开并同步给原生窗口，不在气泡内部生成滚动区域。 */
+  overflow: visible;
   overflow-wrap: anywhere;
   pointer-events: none;
   backdrop-filter: blur(10px);

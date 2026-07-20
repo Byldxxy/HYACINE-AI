@@ -1,3 +1,10 @@
+/**
+ * VMD 动作调度器。
+ *
+ * 所有动作共享同一个 AnimationMixer。本类处理语义优先级、单动作冷却、淡入淡出、
+ * 循环方式和非循环动作结束后回 idle。低优先级事件不能打断高优先级系统/点击动作，
+ * force 仅用于初始化和可靠回待机。
+ */
 import * as THREE from 'three';
 
 const DEFAULT_PRIORITY = {
@@ -25,6 +32,7 @@ export class MotionController {
     }
 
     handleFinished = (event) => {
+        // Mixer 可能同时发出旧 action 的 finished，只响应当前动作，避免错误切回 idle。
         if (!this.current || event.action !== this.current.action) return;
         const shouldReturnToIdle = this.current.name !== 'idle';
         this.current = null;
@@ -55,6 +63,7 @@ export class MotionController {
         const fadeOut = Number(this.current?.definition?.fadeOut ?? 0.25);
         if (this.current?.action) this.current.action.fadeOut(fadeOut);
 
+        // 先淡出旧动作再启用新 action，让 Three.js mixer 在过渡期自动混合骨骼权重。
         const action = this.mixer.clipAction(motion.clip);
         const loop = options.loop ?? definition.loop ?? name === 'idle';
         action.reset();

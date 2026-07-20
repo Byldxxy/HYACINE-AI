@@ -2,6 +2,8 @@
 
 一个基于 React + Express 的 QQ 群 AI 机器人管理面板，通过 NapCat / OneBot v11 与 QQ 通信，支持角色扮演、OpenAI 兼容文本模型、生图、会话记忆、主动发言和桌宠模式。
 
+第一次使用 Git、Node.js 或 Electron？请直接阅读 [HYACINE-AI 1.2.0 零基础使用手册](./USER_GUIDE.md)，其中包含从 GitHub 拉取源码、开发运行和 Windows 生成 EXE 的逐步说明。
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -11,7 +13,7 @@
 | 桌宠 | Electron, Three.js MMD |
 | 存储 | JSON 文件 |
 | QQ 协议 | NapCat / OneBot v11 |
-| 打包 | pkg, Vite |
+| 打包 | Electron Builder, NSIS, Vite |
 
 ## 功能
 
@@ -19,7 +21,6 @@
 - 图片理解：@ 机器人或使用句首唤醒词发送图片时，将图片交给支持视觉输入的文本模型理解并回复。
 - 聊天参考生图：正常聊天触发生图且消息附带图片时，本地角色图作为基底，聊天图片作为姿势、构图、场景或风格参考。
 - AI 生图：支持普通生图和挂载角色参考图的生图流程。
-- 直连生图：`/img`、`/draw` 可跳过文本模型，直接调用生图接口。
 - 触发机制：支持 @ 机器人、自定义唤醒词、全量回复模式。
 - 群聊身份识别：群聊消息会注入发送者昵称/QQ，主人 QQ 会单独标记。
 - 记忆系统：短期记忆、长期摘要、跨会话持久化事实、面板编辑/删除。
@@ -33,7 +34,7 @@
 
 ### 前置条件
 
-- Node.js 18 或更高版本。
+- Node.js 22.12 或更高版本（Vite 7 要求）。
 - 已运行并配置反向 WebSocket 的 NapCat 或其他 OneBot v11 兼容框架。
 
 ### 安装依赖
@@ -141,7 +142,7 @@ manifest 支持以下能力：
 npm run electron:dev
 ```
 
-或使用开发联动脚本：
+该命令要求 Vite 已在另一个终端运行。也可以使用会自动启动并等待 Vite 的跨平台联动脚本：
 
 ```bash
 npm run dev:pet
@@ -216,6 +217,7 @@ HYACINE-AI/
 | `desktopAwarenessInterval` | 桌面视觉分析最短间隔，范围 `30-900` 秒 |
 | `desktopAwarenessCooldown` | 两次桌面互动之间的冷却，范围 `60-3600` 秒 |
 | `desktopAwarenessMaxTokens` | 桌面视觉回复最大输出 Token，范围 `256-10000`，默认 `4000` |
+| `desktopAwarenessMaxReplyLength` | 桌面气泡最大字符数，范围 `80-800`，默认 `300`；超长回复优先按完整句子截取 |
 | `desktopAwarenessChangeThreshold` | 截图上传前的本地画面变化阈值，范围 `0.02-0.5` |
 | `desktopAwarenessExcludedTerms` | 截图前排除的前台应用名、进程名或包标识关键词 |
 | `desktopAwarenessHidePetFromCapture` | 截图时隐藏桌宠内容；可从托盘菜单切换，默认开启 |
@@ -279,9 +281,12 @@ npm run dev          # 前端开发服务器
 npm run build        # 构建前端
 npm run lint         # 静态检查
 npm run preview      # 预览前端构建
-npm run build:exe    # 打包 Windows exe
 npm run electron:dev # 桌宠开发模式
+npm run pack:dir     # 构建当前平台的 Electron 目录包
+npm run dist:win     # 构建 Windows x64 NSIS 安装包
 ```
+
+Electron 安装产物输出到 `release/`。打包采用资源白名单，不包含 `.env`、`data/`、个人预设或 `public/models_fengjin/`；只有放入 `public/models/` 且确认允许再分发的模型资源才会进入本地安装包。
 
 ## 许可
 

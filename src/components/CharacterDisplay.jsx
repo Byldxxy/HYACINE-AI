@@ -1,3 +1,9 @@
+/**
+ * Web 管理面板左侧看板娘。
+ *
+ * 它只加载 public/character.png，并从 config.interactions 随机显示点击台词；与 PMX 桌宠、
+ * VMD 动作和桌面感知无关。资源缺失时 onError 会隐藏图片，让公开仓库无素材也能使用。
+ */
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 

@@ -1,3 +1,9 @@
+/**
+ * 人设与关系提示词配置页。
+ *
+ * systemPrompt 会进入聊天、主动发言和桌面感知请求；master/stranger/groupPrompt 只由
+ * QQ/测试消息流程追加。interactions 是 Web 看板娘点击台词，不是桌宠 manifest 动作。
+ */
 import React from 'react';
 import { Heart, Plus, Trash2 } from 'lucide-react';
 import {

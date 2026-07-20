@@ -1,3 +1,9 @@
+/**
+ * 可拖动的 WebUI 实时日志浮层。
+ *
+ * logs 来源于 useWebSocket，只存在浏览器内存。组件会识别普通图片 URL 和 CQ:image URL
+ * 生成预览，但不会主动下载或持久化 base64 图片内容。
+ */
 import React, { useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Terminal, X } from 'lucide-react';

@@ -1,4 +1,9 @@
-// hooks/useWebSocket.js - WebSocket 连接管理 hook
+/**
+ * WebUI 实时日志 WebSocket。
+ *
+ * 与桌宠 usePetEvents 使用同一端口，但连接后发送 iam_frontend，后端据此只转发日志。
+ * 连接断开后自动重连；cleanup 会移除 onclose，避免页面卸载后定时器重新建连。
+ */
 import { useEffect, useRef } from 'react';
 import { WS_URL } from '../lib/api';
 
