@@ -382,7 +382,7 @@ API Key
 你无权再分发的模型、图片、贴图、动作和音频
 ```
 
-注意：把文件放在 `public/models_fengjin/` 不会进入安装包；可分发模型应放在 `public/models/`，并同步修改 `.env` 或 `pet-manifest.json` 中的本地路径。`.env` 本身不会进入安装包。
+注意：打包白名单只复制 `public/models/`；放在其他本地模型目录的资源不会进入安装包。需要内部测试且确认拥有分发权的模型应放在 `public/models/`，并同步修改 `.env` 或 `pet-manifest.json` 中的本地路径。`.env` 本身不会进入安装包。
 
 ### 8.3 打包前检查
 

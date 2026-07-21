@@ -190,7 +190,7 @@ data/
 - `.env`、API Key 和本地运行时配置。
 - `data/` 中的角色预设、聊天记录、摘要和长期记忆。
 - `public/character.*`、`public/tray_icon.*` 和本地 `public/pet-manifest.json`。
-- `public/models/`、`public/models_fengjin/` 及其中的模型、贴图和动作。
+- `public/models/` 及其他本地模型目录中的模型、贴图和动作。
 - `release/` 中的安装包。
 
 桌面感知默认关闭。启用后，截图只驻留内存，不写入配置、日志或聊天记忆；前台应用隐私排除、用户空闲检测和本地画面变化检测会在调用视觉模型前执行。

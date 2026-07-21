@@ -241,7 +241,7 @@ Electron main process
 - `.env` 和真实 API Key。
 - `data/` 中的配置、会话、摘要、长期事实和角色图片。
 - `public/character.*`、`public/tray_icon.*`、`public/pet-manifest.json`。
-- `public/models/`、`public/models_fengjin/` 中的模型、贴图和动作。
+- `public/models/` 及其他本地模型目录中的模型、贴图和动作。
 - `release/` 中的本地安装包。
 
 ### 可以公开维护
