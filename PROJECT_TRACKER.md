@@ -1,139 +1,323 @@
-# PROJECT_TRACKER - HYACINE-AI 项目理解与开发跟踪
+# HYACINE-AI Project Tracker
 
-> 此文件用于快速理解项目全貌和当前维护状态。
+本文档是项目公开的维护快照，集中记录当前架构、已实现能力、稳定设计约束、工程保障、验证基线、已知限制和后续路线。使用教程见 [USER_GUIDE.md](./USER_GUIDE.md)，项目入口见 [README.md](./README.md)。
 
-工程优化的逐步变更记录见 [`OPTIMIZATION_LOG.md`](./OPTIMIZATION_LOG.md)。
+## 项目状态
 
-## 项目概述
+| 项目 | 当前状态 |
+| --- | --- |
+| 当前版本 | `1.2.0` |
+| 主分支 | `main` |
+| Node.js | `>=22.12.0` |
+| QQ 协议 | NapCat / OneBot v11 反向 WebSocket |
+| WebUI | React 19 + Vite 7 + TailwindCSS 3 |
+| 后端 | Express 5 + ws + OpenAI SDK |
+| 桌宠 | Electron + Three.js MMD |
+| 数据 | 本地 JSON + Zod + 原子写入/备份恢复 |
+| Windows 打包 | Electron Builder + NSIS x64 |
+| CI | GitHub Actions：Windows、macOS、Linux |
+| 源码许可证 | MIT |
 
-可自定义人设与本地视觉资源的 QQ 群 AI 聊天机器人管理面板。
+### 能力完成度
 
-- 前端：React 19 + Vite 7 + TailwindCSS
-- 后端：Express 5 + WebSocket，CommonJS 模块化
-- 桌宠：Electron + Three.js MMD
-- 通信：NapCat / OneBot v11 反向 WebSocket
-- 存储：本地 JSON 文件
+| 能力域 | 状态 | 说明 |
+| --- | --- | --- |
+| QQ 文本对话 | 可用 | @、句首唤醒词、全量回复、身份和群聊上下文 |
+| 图片理解 | 可用 | 当前消息多图输入，需要兼容多模态的文本模型 |
+| 聊天触发生图 | 可用 | 本地角色基底图 + 当前聊天参考图 |
+| 记忆系统 | 可用 | 短期上下文、长期摘要、跨会话事实 |
+| 主动发言 | 可用 | 间隔、冷却、阈值、上下文条数、目标群 |
+| Web 管理面板 | 可用 | 配置、记忆、测试、日志、脱敏诊断 |
+| MMD 桌宠 | 可用 | 模型、VMD、表情、注视、点击和事件状态 |
+| 桌面感知 | 可用，默认关闭 | 主显示器采样、变化筛选、隐私排除、动态气泡 |
+| Windows 安装包 | 可构建 | NSIS x64；尚未签名，缺少正式图标 |
+| TTS | 未实现 | 当前仅有基于说话时长的基础口型 |
 
-## 架构路径
+## 运行架构
 
 ```text
-QQ 消息 -> NapCat -> WebSocket(后端) -> lib/message-handler.js
-                                      -> 文本模型 / 生图模型
-                                      -> send_msg -> NapCat -> QQ
+QQ message
+    │
+    ▼
+NapCat / OneBot v11 reverse WebSocket
+    │
+    ▼
+server.js
+    ├── lib/message-handler.js
+    │      ├── trigger / identity / session queue
+    │      ├── lib/chat-completion.js
+    │      ├── lib/vision.js
+    │      ├── lib/image-gen.js
+    │      └── send_msg -> NapCat -> QQ
+    ├── REST management API -> React WebUI
+    ├── WebSocket logs / pet:event -> WebUI and pet renderer
+    ├── lib/memory.js -> local JSON stores
+    └── lib/proactive.js -> proactive group interaction
 
-配置面板 -> HTTP API -> server.js -> data/bot-config.json / data/bot-sessions.json
-配置面板 <- WebSocket 日志 <- server.js
-Electron -> fork(server.js) + 加载 pet.html
-Electron 主显示器 + 前台应用 -> 本地变化/隐私筛选 -> lib/desktop-awareness.js -> pet:event 气泡
+Electron main process
+    ├── utilityProcess.fork(server.js)
+    ├── BrowserWindow -> pet.html
+    ├── Tray / global cursor / window controls
+    └── desktop-observer.js
+           ├── foreground-app privacy filter
+           ├── primary-display capture
+           ├── local change detection
+           └── desktop-awareness.js -> visual model -> pet:event
 ```
 
-## 核心文件
+### 进程边界
+
+| 进程 | 主要职责 | 通信方式 |
+| --- | --- | --- |
+| 浏览器 WebUI | 配置、记忆管理、测试和日志展示 | HTTP + WebSocket |
+| Node 后端 | OneBot、模型请求、数据持久化和业务规则 | HTTP + WebSocket |
+| Electron 主进程 | 桌面窗口、托盘、截屏、全局鼠标和子进程生命周期 | Electron IPC + utility process IPC |
+| 桌宠渲染进程 | Three.js MMD、动作、表情、气泡和右键菜单 | preload 暴露的白名单 IPC + WebSocket |
+
+## 核心模块
+
+### 后端
 
 | 文件 | 职责 |
 | --- | --- |
-| `server.js` | 后端入口、API、WebSocket、依赖注入、主动发言定时器启动 |
-| `lib/message-handler.js` | QQ 消息触发、上下文构建、LLM 调用、生图拦截、分段发送 |
-| `lib/chat-completion.js` | QQ 与 WebUI 测试共用的提示词、记忆上下文和文本模型请求 |
-| `lib/memory.js` | 会话记忆、长期摘要、持久化事实 |
-| `lib/proactive.js` | 群聊观察、主动发言判断、主动发言定时器 |
-| `lib/desktop-awareness.js` | 桌面视觉分析、结构化决策、互动冷却与提示注入防护 |
-| `lib/image-gen.js` | 生图 API 请求，支持 `imageEndpoint` / `apiEndpoint` |
-| `lib/vision.js` | OneBot 图片提取、下载限制与多模态输入准备 |
-| `lib/paths.js` | 运行时数据目录约定与旧版数据迁移 |
-| `src/lib/api.js` | 前端 API / WebSocket 地址推导 |
-| `src/components/ConfigPanel.jsx` | 配置面板主容器 |
-| `src/components/UIComponents.jsx` | 管理面板共享控件与布局原语 |
-| `src/components/tabs/*.jsx` | 连接、模型、人设、记忆、测试各 Tab |
-| `src/pet/PetScene.jsx` | Three.js MMD 桌宠 |
-| `src/pet/config/petManifest.js` | 桌宠资源清单加载、默认骨骼/Morph/事件语义 |
-| `src/pet/runtime/*.js` | VMD 动作状态机、表情、注视和模型能力诊断 |
-| `src/pet/hooks/usePetEvents.js` | 接收后端桌宠语义事件 |
-| `electron/main.js` | Electron 主进程和托盘 |
-| `electron/desktop-observer.js` | 主显示器采样、前台应用隐私筛选、变化检测和截图压缩 |
+| `server.js` | Express、WebSocket、管理 API、模块装配和进程生命周期 |
+| `lib/message-handler.js` | OneBot 消息触发、会话队列、回复和生图流程 |
+| `lib/chat-completion.js` | QQ 与 WebUI 测试共用的提示词、记忆和文本模型请求 |
+| `lib/vision.js` | OneBot 图片提取、受控下载和多模态内容构建 |
+| `lib/image-gen.js` | 文生图/参考图请求与角色基底优先级 |
+| `lib/memory.js` | 会话、摘要、持久化事实和摘要触发 |
+| `lib/proactive.js` | 群聊观察、主动发言判断、冷却和目标群筛选 |
+| `lib/desktop-awareness.js` | 桌面画面模型请求、输出规范化和互动冷却 |
+| `lib/config.js` | 配置加载、保存、API Key 环境变量覆盖和脱敏 |
+| `lib/schemas.js` | 配置、会话、摘要和事实的 Zod 边界 |
+| `lib/json-store.js` | 串行写入、临时文件替换、备份和恢复 |
+| `lib/paths.js` | 源码、安装态和测试态数据目录约定 |
+| `lib/diagnostics.js` | 不包含敏感内容的运行诊断报告 |
+| `lib/parent-ipc.js` | 普通 Node 与 Electron utility process 的 IPC 适配 |
 
-## 当前关键设计
+### WebUI
 
-1. 后端默认绑定 `127.0.0.1`，可用 `BIND_HOST` 覆盖。
-2. 后端端口来自 `API_PORT` / `PORT`，默认 `3001`。
-3. 前端通过 `src/lib/api.js` 推导 API 和 WS 地址；可用 `VITE_API_BASE_URL` 覆盖。
-4. `.env` 中的 `API_KEY` 优先于 `data/bot-config.json`。
-5. 生图优先使用 `imageEndpoint`，为空时使用 `apiEndpoint` 并自动补 `/chat/completions`。
-6. `longMem` 是长期摘要保留比例，`0` 表示关闭摘要。
-7. `proactiveThreshold` 已参与主动发言置信度判断。
-8. 同一 `sessionId` 的消息处理通过 Promise 队列串行执行，并在完成后清理队列项。
-9. 运行时配置、记忆和用户头像统一存放在 `data/`；`lib/paths.js` 会在启动时迁移旧版路径。
-10. Electron 桌宠显示状态通过管理面板 -> HTTP API -> Node IPC -> Electron 主进程控制。
-11. 桌宠 VMD 资源由本地 manifest 配置；仓库只提交配置示例，不提交第三方动作。
-12. 后端通过专用 `pet:event` WebSocket 消息驱动桌宠注意、思考、说话、生图和错误反馈。
-13. 桌面感知默认关闭，截取主显示器；截图只驻留内存，并在采集前按前台应用执行隐私排除。
-14. 桌面截图先在 Electron 本地执行变化检测和隐私排除，再由独立后端引擎分析，不进入 QQ 会话记忆。
-15. 桌宠窗口隐藏时暂停全部桌面采集和模型调用，重新显示后恢复。
-
-## 配置项状态
-
-| 配置项 | 状态 |
+| 文件 | 职责 |
 | --- | --- |
-| `wsUrl` | 后端读取配置时回填当前运行 WebSocket 地址，用于展示和 NapCat 配置参考 |
-| `httpPort` | 后端读取配置时回填当前运行端口 |
-| `botQQ` | 已用，@ 检测 |
-| `customKeywords` | 已用，唤醒词 |
-| `apiEndpoint` | 已用，文本模型端点；也作为默认生图端点 |
-| `imageEndpoint` | 已用，可单独指定生图端点 |
-| `apiKey` | 已用，支持 `.env` 优先和脱敏传输 |
-| `modelName` | 已用，文本模型 |
-| `imageModel` | 已用，生图模型 |
-| `temperature` | 已用 |
-| `maxReplyLength` | 已用，注入系统提示 |
-| `enableSplit` | 已用，分段发送 |
-| `optimizeImgPrompt` | 已用，控制生图提示词模式 |
-| `masterQQ` | 已用，主人身份识别 |
-| `systemPrompt` | 已用 |
-| `masterPrompt` / `strangerPrompt` / `groupPrompt` | 已用 |
-| `shortMem` | 已用，短期窗口 |
-| `longMem` | 已用，摘要保留比例 |
-| `persistMem` | 已用，持久化事实提取 |
-| `enableProactive` | 已用 |
-| `proactiveInterval` / `proactiveCooldown` / `proactiveThreshold` | 已用 |
-| `proactiveContextSize` | 已用，控制主动发言判断读取的最近群消息条数 |
-| `proactiveTargetGroups` | 已用，支持纯群号或 `group_群号` |
-| `enableDesktopAwareness` | 已用，仅 Electron 模式可用，默认关闭 |
-| `desktopAwarenessInterval` / `desktopAwarenessCooldown` | 已用，控制视觉调用频率与互动冷却 |
-| `desktopAwarenessMaxTokens` | 已用，控制桌面视觉回复最大输出 Token |
-| `desktopAwarenessMaxReplyLength` | 已用，独立控制桌面气泡字符上限并按完整句子截取 |
-| `desktopAwarenessChangeThreshold` | 已用，控制本地画面变化门槛 |
-| `desktopAwarenessExcludedTerms` | 已用，在截图生成前排除敏感前台应用 |
-| `currentPersonaFileName` | 已用，生图参考图 |
+| `src/components/ConfigPanel.jsx` | 配置面板主容器和保存入口 |
+| `src/components/UIComponents.jsx` | 共享表单控件、按钮、分区和布局原语 |
+| `src/components/tabs/*.jsx` | 连接、模型、人设、记忆和测试页面 |
+| `src/hooks/useConfig.js` | 默认配置、加载、编辑和完整快照保存 |
+| `src/hooks/useWebSocket.js` | WebUI 日志 WebSocket 生命周期 |
+| `src/hooks/useDesktopPet.js` | Electron 桌宠可用状态和显示控制 |
+| `src/hooks/useDesktopAwareness.js` | 桌面感知运行状态 |
+| `src/lib/api.js` | 浏览器端 API、WebSocket 和资源 URL 推导 |
 
-## 近期已完成
+### Electron 与桌宠
 
-- README 重写，移除 Vite 模板残留。
-- 后端默认本机绑定，端口支持环境变量。
-- 前端 API / WebSocket 地址集中管理。
-- 生图端点从硬编码改为配置驱动。
-- 主动发言定时器统一到 `lib/proactive.js`。
-- 主动发言阈值真正参与判断。
-- 长期记忆 `longMem` 改为比例语义。
-- ESLint 分离浏览器和 Node 环境，并忽略构建产物/模型资源。
-- `.gitignore` 增加构建产物、运行时数据和用户自备视觉资源。
-- 运行时 JSON 与用户头像迁移到 `data/`，静态发布资源保留在 `public/`。
-- 管理面板保留粉色二次元毛玻璃视觉，所有基础表单控件统一到共享组件。
-- 管理面板和托盘菜单增加 Electron 桌宠显示开关。
-- 仓库移除第三方模型和图片，视觉资源改为由使用者在本地自行提供。
-- @ 或句首唤醒词触发的图片消息支持多模态模型理解，图片不写入会话文件。
-- 正常聊天触发生图时支持“本地角色基底图 + 当前聊天参考图”的多图输入与角色优先级约束。
-- 桌宠运行时拆分为 manifest、动作、表情、注视、事件和覆盖层模块，支持 VMD 状态机与无动作降级。
-- Electron 桌宠支持通用桌面感知、前台应用隐私过滤、本地画面变化筛选和主动互动气泡。
-- Electron Builder/NSIS Windows 安装链路、跨平台开发启动脚本与安装态 `userData` 路径已接通。
-- 修复开发态 Electron 错读系统 `userData` 导致配置看似清空的问题；源码模式继续使用项目 `data/`，安装态保持用户目录存储。
-- 配置和记忆已增加 Zod 校验、版本字段、串行原子写入和 `.bak` 恢复。
-- 聊天图片下载已增加 DNS/IP/重定向 SSRF 防护。
-- QQ 聊天与 WebUI 测试聊天已共用提示词、记忆上下文和文本模型请求模块。
-- GitHub Actions 已覆盖 Windows/macOS/Linux，后端集成测试和脱敏诊断导出已加入。
+| 文件 | 职责 |
+| --- | --- |
+| `electron/main.js` | utility process、透明窗口、托盘、全局鼠标、显示状态和 IPC |
+| `electron/preload.js` | 向渲染进程暴露最小化 Electron 能力 |
+| `electron/desktop-observer.js` | 主显示器采样、权限、隐私排除、变化检测和截图压缩 |
+| `src/pet/PetScene.jsx` | Three.js 场景、模型加载、窗口尺寸和交互协调 |
+| `src/pet/config/petManifest.js` | 本地 manifest、骨骼/Morph 映射和事件配置 |
+| `src/pet/runtime/MotionController.js` | VMD 优先级、冷却、淡入淡出和待机回退 |
+| `src/pet/runtime/ExpressionController.js` | Morph 表情、眨眼和基础说话口型 |
+| `src/pet/runtime/LookAtController.js` | 全局鼠标驱动的头部/眼睛注视 |
+| `src/pet/runtime/modelDiagnostics.js` | 骨骼、Morph、材质和物理能力报告 |
+| `src/pet/ui/PetOverlay.jsx` | 气泡、状态、右键菜单和临时测试入口 |
 
-## 后续建议
+## 稳定设计约束
 
-- 为管理 API 增加可选本地 token。
-- 将 Electron 中通过 WebUI 输入的 API Key 迁移到系统安全存储。
-- 为 `smartSplit`、主动发言 JSON 解析、记忆摘要触发补单元测试。
-- Three.js 暂固定为 `0.170.0`；升级前需将已弃用的 `MMDAnimationHelper` 迁移到后续维护方案。
-- 在真实 Windows 环境完成 NSIS 安装、升级、卸载及桌面感知烟测，并配置代码签名与正式图标。
+以下约束用于避免不同入口、运行模式和发行包之间出现行为漂移。
+
+### 配置与模型请求
+
+1. 文本模型采用 OpenAI Chat Completions 兼容接口。
+2. `apiEndpoint`、`modelName`、`imageEndpoint` 和 `imageModel` 由 WebUI 保存；新安装不携带私人默认值。
+3. `.env` 的 `API_KEY` 优先于 `data/bot-config.json`，用于避免 WebUI 将真实 Key 写盘。
+4. `imageEndpoint` 为空时可复用文本服务端点；生图仍要求显式配置模型。
+5. QQ 对话与 WebUI 对话测试必须复用 `lib/chat-completion.js`，避免提示词、视觉输入和记忆结构分叉。
+6. 同一 `sessionId` 的消息通过 Promise 队列串行处理，不同会话可以并行。
+
+### 数据持久化
+
+1. 源码模式使用项目 `data/`；安装版使用操作系统 `userData`；测试可通过环境变量隔离目录。
+2. 配置、会话、摘要和事实写入前经过 Zod 校验。
+3. 同一文件的写入串行化，并使用临时文件、刷新、原子替换和 `.bak` 恢复。
+4. 管理 API 的无效数据返回结构化 `400`，写入异常返回结构化 `500`。
+5. 运行时 JSON、角色参考图和私人配置不得进入 Git 或公开构建。
+
+### 图片和网络边界
+
+1. 单条消息最多读取 3 张图片，每张最大 6 MB，总请求受 15 秒超时约束。
+2. 仅接受 HTTP/HTTPS 图片，拒绝嵌入凭据、本地主机、私网、回环、链路本地和保留地址。
+3. 最多跟随 3 次重定向，每一跳重新执行 URL、DNS 和 IP 校验。
+4. 聊天图片只进入当前模型请求，会话文件仅保存图片数量占位。
+5. 本地角色图片是生图身份基底，聊天图片只作为姿势、构图、场景或风格参考。
+
+### Electron 与桌面感知
+
+1. 后端在 Electron utility process 中运行，主进程等待明确的 `server-ready` 后再创建窗口。
+2. 后端异常退出采用有限次数退避重启，应用保持单实例。
+3. 桌面感知默认关闭，只截取主显示器，截图驻留内存且不进入 QQ 记忆。
+4. 截图上传前执行前台应用隐私排除、用户空闲检查和本地画面变化筛选。
+5. 桌宠隐藏时暂停截图和视觉模型调用；重新显示后恢复观察。
+6. 内容保护开关决定桌宠是否出现在截图中，允许用户在隐私保护和自我互动之间选择。
+7. 桌面回复的 Token 预算与气泡字符上限独立；超长文本优先按完整句子结束。
+8. 气泡按文本实测高度扩展 Electron 窗口，不使用内部滚动条，并固定人物脚部位置。
+
+### 本地视觉资源
+
+1. 仓库只提供 `public/pet-manifest.example.json`，不提交第三方模型、贴图、动作和个人图片。
+2. 开发态从 `public/` 读取本地资源；生产构建不自动复制整个 `public/`。
+3. Electron Builder 只复制明确白名单中的运行资源。
+4. 单个 VMD 缺失不阻止模型显示，运行时降级为无动作待机。
+
+## 主要配置分组
+
+| 分组 | 关键配置 | 说明 |
+| --- | --- | --- |
+| OneBot | `botQQ`, `customKeywords`, `alwaysReply` | 机器人身份与消息触发 |
+| 文本模型 | `apiEndpoint`, `apiKey`, `modelName`, `temperature` | OpenAI 兼容对话服务 |
+| 生图 | `imageEndpoint`, `imageModel`, `optimizeImgPrompt` | 生图服务和提示词处理 |
+| 人设 | `charName`, `systemPrompt`, `masterQQ`, 身份附加提示 | 角色和场景身份 |
+| 记忆 | `shortMem`, `longMem`, `persistMem` | 短期、摘要和长期事实 |
+| 主动发言 | `enableProactive`, 间隔、冷却、阈值、上下文、目标群 | 群聊主动互动 |
+| 桌面感知 | `enableDesktopAwareness`, 间隔、冷却、Token、字符、变化阈值、排除词 | 桌宠画面互动 |
+| 本地角色 | `currentPersonaFileName` | 生图身份基底图 |
+
+## 工程保障
+
+### 跨平台启动与安装
+
+- `scripts/dev-pet.js` 提供 Windows、macOS、Linux 通用的 Vite + Electron 开发启动。
+- Electron Builder 提供当前平台目录包和 Windows NSIS x64 安装包。
+- 安装态页面和资源由本地后端通过 HTTP 提供，避免 `file://` 与根路径资源不一致。
+- 安装态数据写入用户目录；源码态继续使用项目 `data/`。
+
+### 输出与桌宠体验
+
+- 桌面模型回复支持纯文本、结构化内容和兼容内容数组的统一规范化。
+- 气泡字符限制采用句末优先的自然截取，避免在半句话中间截断。
+- 气泡高度、原生窗口尺寸和人物锚点联动，不产生内部滚动条或人物跳动。
+- 全局鼠标坐标由 Electron 主进程采样，注视不受透明窗口范围限制。
+
+### 数据完整性
+
+- Zod 统一覆盖磁盘加载和管理 API 输入。
+- JSON 写入队列防止并发覆盖，原子替换降低进程中断造成的文件损坏。
+- 主文件不可用时可从最近备份恢复。
+- 配置版本字段为后续迁移提供边界，未知字段保留以支持兼容扩展。
+
+### 安全与发布边界
+
+- 图片下载包含 URL、DNS、IP 和逐跳重定向验证，降低 SSRF 风险。
+- 后端默认绑定 `127.0.0.1`；跨域仅允许本机来源。
+- 诊断导出只包含平台、状态和计数，不包含 Key、端点、模型名、提示词、窗口标题、消息、摘要或事实。
+- `scripts/check-release-boundary.js` 阻止本地运行数据和模型资源进入 Git 跟踪或 Vite 构建。
+- `.gitignore` 排除 `.env`、`data/`、本地视觉资源、构建产物和安装包。
+
+### 自动化验证
+
+- Node.js 测试覆盖共享模型请求、桌面感知、桌面源选择、诊断脱敏、生图参考图、配置/记忆持久化、主动发言和图片网络边界。
+- 隔离后端集成测试验证启动、Electron 不可用降级、配置/记忆校验和诊断脱敏。
+- GitHub Actions 在 Ubuntu、macOS 和 Windows 上执行 `npm ci`、lint、测试、生产构建和发布边界检查。
+- 手动工作流可在 Windows runner 生成 NSIS 安装包 artifact。
+
+## 版本 1.2.0 验证基线
+
+| 检查 | 状态 |
+| --- | --- |
+| `npm run lint` | 通过 |
+| `npm test` | 39 项测试均已验证；受限沙箱中的回环测试另在可监听环境通过 |
+| `npm run build` | 通过 |
+| `npm run check:release` | 通过 |
+| GitHub Actions 三平台 CI | 通过 |
+| `npm audit` | 发布时为 0 个已知漏洞 |
+| Windows NSIS 构建链路 | 已验证可生成 x64 安装包 |
+| 私有资源审计 | `.env`、运行时数据、预设、模型、贴图和动作未进入公开提交 |
+
+## 发布边界
+
+### 不进入公开仓库
+
+- `.env` 和真实 API Key。
+- `data/` 中的配置、会话、摘要、长期事实和角色图片。
+- `public/character.*`、`public/tray_icon.*`、`public/pet-manifest.json`。
+- `public/models/`、`public/models_fengjin/` 中的模型、贴图和动作。
+- `release/` 中的本地安装包。
+
+### 可以公开维护
+
+- 源码、测试、CI、构建配置和 MIT License。
+- `.env.example` 中的非敏感占位符。
+- `public/pet-manifest.example.json` 中的资源路径示例。
+- 不包含私人端点、模型名和角色内容的默认配置结构。
+
+## 已知限制
+
+| 限制 | 影响 | 后续方向 |
+| --- | --- | --- |
+| Windows 安装包未签名 | SmartScreen 可能拦截 | 配置代码签名证书 |
+| 缺少正式 `.ico` | 安装包使用默认 Electron 图标 | 增加品牌图标资源 |
+| WebUI 输入的 Key 可明文写入本地配置 | 本机文件读取者可见 | 优先使用 `.env`；评估 Electron `safeStorage` |
+| 管理 API 无独立认证 | 本机其他进程可访问默认端口 | 增加可选本地 token |
+| DNS 校验与实际 fetch 分两次解析 | 极端条件仍存在 DNS rebinding 理论窗口 | 使用可固定已验证地址的 dispatcher |
+| 桌面感知依赖操作系统权限 | 首次使用需要授权，平台行为有差异 | 扩充真实 Windows/macOS 烟测 |
+| 桌宠主 bundle 较大 | 构建产生 chunk 警告 | 拆分 Three.js/MMD 懒加载边界 |
+| Three.js 固定 `0.170.0` | 升级受 MMD API 兼容性约束 | 迁移已弃用的 MMD helper 后再升级 |
+| 暂无 TTS | 发言只显示气泡和模拟口型 | 设计可替换的本地/远端语音适配层 |
+
+## 路线图
+
+### P0：发行质量
+
+- 在真实 Windows 10/11 环境完成安装、升级、重启持久化、卸载和桌面感知烟测。
+- 增加正式应用图标和 Windows 代码签名。
+- 为发布流程增加安装包校验和版本化 Release artifact。
+
+### P1：安全与可维护性
+
+- 为管理 API 增加默认关闭、可选启用的本地访问 token。
+- 评估 Electron `safeStorage` 与普通 Node 模式兼容的 Key 存储方案。
+- 为智能分段、主动发言兼容解析和摘要触发补充边界测试。
+- 拆分桌宠大体积依赖，降低首次加载和构建 chunk 体积。
+
+### P2：桌宠体验
+
+- 收集并验证获得授权的 idle、attention、thinking、speaking、greet 等 VMD 动作。
+- 增加基于动作能力检测的设置反馈和 manifest 校验工具。
+- 设计 TTS 适配接口，并使用音频振幅替换模拟口型。
+- 评估可选的桌面场景规则或本地轻量识别器，同时保留通用视觉模型降级路径。
+
+## 维护流程
+
+提交功能前至少执行：
+
+```bash
+npm run lint
+npm test
+npm run build
+npm run check:release
+git diff --check
+```
+
+涉及以下边界时同步更新文档和测试：
+
+- 新增配置字段：更新 `types.js`、前端默认值、表单、后端使用点和 Schema。
+- 修改模型请求：同步 QQ 对话、WebUI 测试、视觉输入和错误处理。
+- 修改 Electron IPC：同步主进程、preload、渲染端和不可用降级。
+- 修改桌宠事件：同步后端事件名、manifest 默认映射和运行时控制器。
+- 修改持久化文件：提供迁移、校验、原子写入和恢复测试。
+- 修改打包资源：重新执行发布边界和安装包内容审计。
+
+## 发布历史
+
+| 版本 | 主要内容 |
+| --- | --- |
+| `v1.0.0` | 初始公开版本、MIT License、基础 WebUI 与机器人能力 |
+| `v1.1.0` | 桌宠、桌面感知、图片理解与聊天参考生图 |
+| `v1.2.0` | Electron/Windows 打包链路、持久化与安全边界、共享请求模块、诊断、跨平台 CI、完整使用手册 |
+
+## 文档导航
+
+- [README.md](./README.md)：项目展示、核心能力和快速开始。
+- [USER_GUIDE.md](./USER_GUIDE.md)：面向零基础用户的完整安装、运行和打包说明。
+- [LICENSE](./LICENSE)：MIT License。
