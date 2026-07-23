@@ -24,7 +24,7 @@ const { createConfigManager } = require('./lib/config');
 const { createMemoryManager } = require('./lib/memory');
 const { observeMessage, restartProactiveTimer } = require('./lib/proactive');
 const { createMessageHandler, sendToQQ } = require('./lib/message-handler');
-const { generateImage } = require('./lib/image-gen');
+const { generateImage, selectImageGenerationPrompt } = require('./lib/image-gen');
 const { createDesktopAwarenessEngine, normalizeDesktopAwarenessConfig } = require('./lib/desktop-awareness');
 const { getRuntimePaths, prepareRuntimeData } = require('./lib/paths');
 const { hasParentIpc, onParentMessage, sendToParent } = require('./lib/parent-ipc');
@@ -463,13 +463,23 @@ app.post('/api/test-chat', async (req, res) => {
         const completion = await requestChatCompletion(config, messagesToSend);
 
         const aiReply = completion.choices[0]?.message?.content || "(AI 未返回内容)";
-        sessions[testSessionId].push({ role: "assistant", content: aiReply });
-        await memory.saveMemoryToDisk();
-
         const imgCmdMatch = aiReply.match(/\[CMD:IMAGE_GEN\]\s*(.*)/);
         if (imgCmdMatch) {
-            return res.json({ reply: aiReply, isImage: true, imagePrompt: imgCmdMatch[1] });
+            const imagePrompt = selectImageGenerationPrompt(config, message, imgCmdMatch[1]);
+            const reply = config.optimizeImgPrompt === true
+                ? aiReply
+                : `[CMD:IMAGE_GEN] ${imagePrompt}`;
+            sessions[testSessionId].push({
+                role: "assistant",
+                content: config.optimizeImgPrompt === true
+                    ? aiReply
+                    : '[已按上一条用户原始要求生成图片]',
+            });
+            await memory.saveMemoryToDisk();
+            return res.json({ reply, isImage: true, imagePrompt });
         }
+        sessions[testSessionId].push({ role: "assistant", content: aiReply });
+        await memory.saveMemoryToDisk();
         res.json({ reply: aiReply, isImage: false });
     } catch (error) {
         res.status(500).json({ error: error.message });

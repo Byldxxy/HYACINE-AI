@@ -1,7 +1,7 @@
 {
   "name": "hyacine-ai",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "OpenAI-compatible QQ bot management panel with an Electron MMD desktop pet",
   "author": "HYACINE-AI contributors",
   "engines": {

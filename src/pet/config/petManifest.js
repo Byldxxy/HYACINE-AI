@@ -31,6 +31,7 @@ export const DEFAULT_PET_MANIFEST = {
     events: {
         attention: { motion: 'attention', expression: 'surprised' },
         thinking: { motion: 'thinking' },
+        desktopAnalysisFinished: { motion: 'idle', priority: 30 },
         speaking: { motion: 'speaking', expression: 'smile' },
         desktopComment: { motion: 'speaking', expression: 'smile' },
         imageGenerating: { motion: 'magic', expression: 'smile' },

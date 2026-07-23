@@ -20,7 +20,7 @@
       "cooldown": 2
     },
     "attention": { "file": "/models/motions/attention.vmd", "priority": 10 },
-    "thinking": { "file": "/models/motions/thinking.vmd", "priority": 10 },
+    "thinking": { "file": "/models/motions/thinking.vmd", "loop": true, "priority": 10 },
     "speaking": { "file": "/models/motions/speaking.vmd", "priority": 10 },
     "magic": { "file": "/models/motions/magic.vmd", "priority": 30 },
     "greet": { "file": "/models/motions/greet.vmd", "priority": 20 },
@@ -45,6 +45,7 @@
   "events": {
     "attention": { "motion": "attention", "expression": "surprised" },
     "thinking": { "motion": "thinking" },
+    "desktopAnalysisFinished": { "motion": "idle", "priority": 30 },
     "speaking": { "motion": "speaking", "expression": "smile" },
     "desktopComment": { "motion": "speaking", "expression": "smile" },
     "imageGenerating": { "motion": "magic", "expression": "smile" },

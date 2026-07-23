@@ -27,6 +27,7 @@ const MIN_SPEECH_HEADROOM = 64;
 const MAX_SPEECH_HEADROOM = 500;
 const MAX_RENDERED_SPEECH_LENGTH = 1000;
 const PET_SCALE_KEY = 'hyacine-pet-scale';
+const DIRECT_INTERACTION_PRIORITY = 40;
 
 function loadPetScale() {
     // localStorage 属于 renderer；原生窗口尺寸由后续 effect 通过 preload 同步。
@@ -112,20 +113,23 @@ export default function PetScene() {
     const triggerDefinition = useCallback((definition, kind = 'event', detail = {}) => {
         // definition 来自 manifest；动作和表情互相独立，缺少其一时另一项仍可执行。
         const state = sceneRef.current;
-        if (!state || !definition) return;
+        if (!state || !definition) return { motionPlayed: false, expressionPlayed: false };
+        let motionPlayed = false;
+        let expressionPlayed = false;
         if (definition.motion) {
-            state.motionController?.play(definition.motion, {
+            motionPlayed = Boolean(state.motionController?.play(definition.motion, {
                 kind,
-                priority: definition.priority,
+                priority: detail.priority ?? definition.priority,
                 cooldown: definition.cooldown,
                 duration: detail.duration,
-            });
+            }));
         }
         if (definition.expression) {
-            state.expressionController?.play(definition.expression, {
+            expressionPlayed = Boolean(state.expressionController?.play(definition.expression, {
                 duration: Number(detail.duration) || Number(definition.duration) || 1.2,
-            });
+            }));
         }
+        return { motionPlayed, expressionPlayed };
     }, []);
 
     const handlePetEvent = useCallback((event, detail) => {
@@ -135,7 +139,12 @@ export default function PetScene() {
         const definition = event === 'desktopComment'
             ? state?.manifest?.events?.desktopComment || state?.manifest?.events?.speaking
             : state?.manifest?.events?.[event];
-        triggerDefinition(definition, event === 'error' ? 'system' : 'event', detail);
+        const result = triggerDefinition(definition, event === 'error' ? 'system' : 'event', detail);
+        // 本地可能只有 thinking/idle，没有 speaking、magic 或 confused VMD。
+        // 这些完成类事件缺少对应动作时仍要退出循环思考，不能一直卡在 thinking。
+        if (['speaking', 'imageGenerating', 'error'].includes(event) && !result.motionPlayed) {
+            state?.motionController?.returnToIdle();
+        }
         if (event === 'speaking' || event === 'desktopComment') {
             state?.expressionController?.speak(Number(detail.duration) || 1.5);
         }
@@ -249,7 +258,11 @@ export default function PetScene() {
         setShowMenu(false);
         const state = sceneRef.current;
         if (!state?.isHovering || !state.hoverRegion) return;
-        triggerDefinition(state.manifest?.interactions?.[state.hoverRegion], 'reaction');
+        // 用户主动点击应高于桌面分析等后台事件；否则循环 thinking 会让点击看似失效，
+        // 随后到达的 desktopAnalysisFinished 也可能在舞蹈中途强制切回待机。
+        triggerDefinition(state.manifest?.interactions?.[state.hoverRegion], 'reaction', {
+            priority: DIRECT_INTERACTION_PRIORITY,
+        });
     }, [triggerDefinition]);
 
     const openConfig = useCallback(() => {
@@ -335,7 +348,12 @@ export default function PetScene() {
             } catch (physicsError) {
                 console.warn('[Pet] Ammo initialization failed:', physicsError.message);
             }
-            helper = new MMDAnimationHelper({ afterglow: 2, sync: false });
+            helper = new MMDAnimationHelper({
+                afterglow: 2,
+                sync: false,
+                // 物理保持连续运行；禁用循环边界硬重置，避免每轮待机都让衣物跳动。
+                resetPhysicsOnLoop: false,
+            });
             runtime.helper = helper;
 
             const loader = new MMDLoader();
@@ -360,6 +378,11 @@ export default function PetScene() {
             const { motions, errors: motionErrors } = await loadManifestMotions(loader, mesh, runtime.manifest.motions);
             if (disposed) return;
             motionErrors.forEach(item => console.warn(`[Pet] Motion failed: ${item.name} (${item.file})`, item.message));
+            Object.entries(motions).forEach(([name, motion]) => {
+                if (motion.removedSolverTracks > 0) {
+                    console.info(`[Pet] Motion sanitized: ${name}, removed ${motion.removedSolverTracks} solver-owned tracks`);
+                }
+            });
             const clips = Object.values(motions).map(item => item.clip);
             helper.add(mesh, {
                 animation: clips.length > 0 ? clips : undefined,
@@ -421,10 +444,12 @@ export default function PetScene() {
             if (document.hidden) return;
             runtime.time += delta;
 
-            // 顺序很重要：撤销上一帧视线 -> VMD/物理更新 -> fallback 待机 -> Morph ->
+            // 顺序很重要：撤销上一帧视线 -> 完成动作过渡 -> VMD/物理更新 -> Morph ->
             // 重新叠加视线 -> 渲染。交换顺序会导致头部偏移累积或被动作覆盖。
             runtime.lookAtController?.beforeAnimation();
+            runtime.motionController?.beforeAnimationUpdate();
             runtime.helper?.update(delta);
+            runtime.motionController?.afterAnimationUpdate(delta);
 
             if (runtime.model && !runtime.motionController?.has('idle')) {
                 runtime.model.position.y = Math.sin(runtime.time * 1.5) * 0.15;

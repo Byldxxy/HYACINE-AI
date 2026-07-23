@@ -148,7 +148,11 @@ test('emits one desktop comment and respects cooldown without persisting a sessi
 
     assert.equal((await engine.handleFrame(frame)).status, 'commented');
     assert.equal(engine.getState().lastResult.status, 'commented');
-    assert.equal(events[0].event, 'desktopComment');
+    assert.deepEqual(events.map(item => item.event), [
+        'thinking',
+        'desktopComment',
+        'desktopAnalysisFinished',
+    ]);
     assert.equal(requestCount, 1);
 
     currentTime += 31_000;
@@ -158,7 +162,11 @@ test('emits one desktop comment and respects cooldown without persisting a sessi
     currentTime += 1;
     assert.equal((await engine.handleFrame({ ...frame, force: true })).status, 'commented');
     assert.equal(requestCount, 2);
-    assert.equal(events.length, 2);
+    assert.deepEqual(events.slice(3).map(item => item.event), [
+        'thinking',
+        'desktopComment',
+        'desktopAnalysisFinished',
+    ]);
     assert.match(lastMessages[0].content, /用户主动发起的桌面感知测试/);
 });
 
@@ -177,14 +185,24 @@ test('reports a visible failure when a forced desktop test returns no reply', as
         window: { ownerName: 'Code', title: '' },
     });
     assert.equal(result.status, 'silent');
-    assert.deepEqual(events, [{
-        event: 'desktopComment',
-        detail: {
-            text: '这次桌面识别没有生成回应。',
-            duration: 4,
-            activity: 'desktop-test',
+    assert.deepEqual(events, [
+        {
+            event: 'thinking',
+            detail: { activity: 'desktop-analysis', forced: true, priority: 30 },
         },
-    }]);
+        {
+            event: 'desktopComment',
+            detail: {
+                text: '这次桌面识别没有生成回应。',
+                duration: 4,
+                activity: 'desktop-test',
+            },
+        },
+        {
+            event: 'desktopAnalysisFinished',
+            detail: { activity: 'desktop-analysis', forced: true },
+        },
+    ]);
 });
 
 test('uses a plain text model reply for a forced desktop test', async () => {
@@ -202,5 +220,38 @@ test('uses a plain text model reply for a forced desktop test', async () => {
         window: { ownerName: 'Code', title: '' },
     });
     assert.equal(result.status, 'commented');
-    assert.equal(events[0].detail.text, '这段代码看起来快收尾了。');
+    assert.equal(events[0].event, 'thinking');
+    assert.equal(events[1].detail.text, '这段代码看起来快收尾了。');
+    assert.equal(events[2].event, 'desktopAnalysisFinished');
+});
+
+test('keeps the thinking event active until a desktop request settles', async () => {
+    const events = [];
+    let rejectRequest;
+    const completionRequest = new Promise((_resolve, reject) => {
+        rejectRequest = reject;
+    });
+    const engine = createDesktopAwarenessEngine({
+        getConfig: () => ({ enableDesktopAwareness: true, apiKey: 'test-key' }),
+        emitPetEvent: (event, detail) => events.push({ event, detail }),
+        createClient: () => ({
+            chat: { completions: { create: () => completionRequest } },
+        }),
+    });
+
+    const pending = engine.handleFrame({
+        force: true,
+        dataUrl: 'data:image/jpeg;base64,AQID',
+        window: { ownerName: 'Code', title: '' },
+    });
+    await Promise.resolve();
+    assert.deepEqual(events.map(item => item.event), ['thinking']);
+
+    rejectRequest(new Error('provider unavailable'));
+    assert.equal((await pending).status, 'error');
+    assert.deepEqual(events.map(item => item.event), [
+        'thinking',
+        'desktopComment',
+        'desktopAnalysisFinished',
+    ]);
 });

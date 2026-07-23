@@ -17,6 +17,7 @@ async function createTemporaryDirectory(t) {
 test('validates configuration and stamps the current schema version', () => {
     const config = normalizeBotConfig({ apiEndpoint: '', desktopAwarenessMaxReplyLength: 300 });
     assert.equal(config.configVersion, 1);
+    assert.equal(config.optimizeImgPrompt, false);
     assert.equal(normalizeBotConfig({ botQQ: 123456 }).botQQ, '123456');
     assert.throws(
         () => normalizeBotConfig({ desktopAwarenessMaxReplyLength: 'many' }),

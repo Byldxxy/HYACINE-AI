@@ -1,4 +1,4 @@
-# HYACINE-AI 1.2.0 零基础使用手册
+# HYACINE-AI 1.2.1 零基础使用手册
 
 这份手册面向第一次接触 Git、Node.js、命令行和 Electron 的用户。按照顺序操作即可，不需要先理解项目源码。
 
@@ -92,10 +92,10 @@ git clone https://github.com/Byldxxy/HYACINE-AI.git
 cd HYACINE-AI
 ```
 
-如果要使用经过标记的 `1.2.0` 版本，而不是随时可能更新的开发分支，再执行：
+如果要使用经过标记的 `1.2.1` 版本，而不是随时可能更新的开发分支，再执行：
 
 ```bash
-git checkout v1.2.0
+git checkout v1.2.1
 ```
 
 检查当前版本：
@@ -104,7 +104,7 @@ git checkout v1.2.0
 git status
 ```
 
-看到 `On branch main` 表示正在使用最新主分支；看到 `HEAD detached at v1.2.0` 不是错误，表示正在使用固定的 1.2.0 版本。
+看到 `On branch main` 表示正在使用最新主分支；看到 `HEAD detached at v1.2.1` 不是错误，表示正在使用固定的 1.2.1 版本。
 
 ### 3.3 不使用 Git 的下载方式
 
@@ -338,12 +338,12 @@ npm run check:release
 
 本节需要在 Windows 10/11 x64 环境完成。推荐使用 PowerShell，并确保 Git、Node.js 22.12+ 已安装。
 
-### 8.1 获取干净的 1.2.0 源码
+### 8.1 获取干净的 1.2.1 源码
 
 ```powershell
 git clone https://github.com/Byldxxy/HYACINE-AI.git
 cd HYACINE-AI
-git checkout v1.2.0
+git checkout v1.2.1
 npm ci
 ```
 
@@ -352,7 +352,7 @@ npm ci
 ```powershell
 git status
 git pull
-git checkout v1.2.0
+git checkout v1.2.1
 npm ci
 ```
 
@@ -410,14 +410,14 @@ npm run dist:win
 第一次打包可能需要下载 Electron Builder 使用的 Windows 工具，时间会比普通构建长。完成后安装程序位于：
 
 ```text
-release/HYACINE-AI-Setup-1.2.0-x64.exe
+release/HYACINE-AI-Setup-1.2.1-x64.exe
 ```
 
 `release/` 已被 Git 忽略，不会因为普通 `git add .` 而上传到源码仓库。
 
 ### 8.5 安装和验证
 
-1. 在测试机运行 `HYACINE-AI-Setup-1.2.0-x64.exe`。
+1. 在测试机运行 `HYACINE-AI-Setup-1.2.1-x64.exe`。
 2. 选择安装目录并完成安装。
 3. 首次启动应看到桌宠或模型缺失提示，取决于安装包是否携带本地授权素材。
 4. 打开管理面板，确认 API Endpoint、API Key 和角色预设为空。
