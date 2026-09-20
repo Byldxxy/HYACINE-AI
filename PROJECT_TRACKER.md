@@ -2,11 +2,33 @@
 
 本文档是项目公开的维护快照，集中记录当前架构、已实现能力、稳定设计约束、工程保障、验证基线、已知限制和后续路线。使用教程见 [USER_GUIDE.md](./USER_GUIDE.md)，项目入口见 [README.md](./README.md)。
 
+## v1.2.2 发布（2026-09-20）
+
+汇总本轮群聊消息链与防复读修复，以及桌宠状态机、窗口互动、拖拽甩动、角色渲染、注视和统一菜单改进。后端 108 项测试及代码检查已通过；真实群聊效果与跨平台桌宠表现仍需实际运行观察。成员外号记忆、自然续聊及人设表达收敛属于后续计划，未包含在本版本中。
+
+## 当前工作区更新：群聊消息链与防复读（2026-09-17）
+
+QQ 后端改为结构化消息链、统一会话队列与回执确认后提交。主动发言增加新消息水位、单次运行锁、普通回复优先、生成结果失效检查及近似文本复读抑制。分段延迟留在队列内，重置取消旧任务；失败不再盲目 pop 历史。自动事实按会话隔离，摘要合并且有长度上限。新增单元测试和独立 OneBot/模型模拟服务的 WebSocket 集成测试，未向真实群发送测试消息。
+
+本轮不调整 WebUI 或桌宠，不更改发布版本号，不清空用户配置与历史。完整说明、兼容性和限制见 [BOT_LOGIC.md](./BOT_LOGIC.md)。
+
+## 当前工作区更新：统一菜单与交互暂停
+
+桌宠、托盘和 macOS Dock 使用同一原生菜单模板及命令入口，修复置顶勾选失真、穿透入口状态不一致和“回到桌面”在关闭散步时不可用。尺寸调整迁入屏幕可用区域内的独立面板，支持 50%–250%，松手提交并保持脚底锚点；菜单、面板、鼠标停留和按住交互分别持有暂停原因，不会相互提前解除。操作及验证见 [CONTROLS_GUIDE.md](./CONTROLS_GUIDE.md)。
+
+## 当前工作区更新：角色渲染与瞳孔修复
+
+增加独立的三渲二角色管线，按脸部、头发、皮肤、衣物、金属和眼睛分区着色，修复整体偏暗、红色粗描边与透明边缘合成。注视改为近距离跟随和自动回正，在 MMD 求解后同步左右眼与补偿骨。保留前述动作状态机和窗口沿边走动／攀爬。实现、视觉参考和验证方式见 [RENDERING_GUIDE.md](./RENDERING_GUIDE.md)。
+
+## 当前工作区更新：桌宠行为与窗口互动
+
+在 v1.2.1 基础上增加语义状态机、原地动作回退、配布呼吸／招呼／步行适配，以及窗口顶部散步、侧边攀爬和支撑丢失下落。替换本地摸头／身体点击触发测试舞蹈的映射。使用方式、动作出处和平台边界见 [COMPANION_GUIDE.md](./COMPANION_GUIDE.md)。本次未更改发布版本号。
+
 ## 项目状态
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 当前版本 | `1.2.1` |
+| 当前版本 | `1.2.2` |
 | 主分支 | `main` |
 | Node.js | `>=22.12.0` |
 | QQ 协议 | NapCat / OneBot v11 反向 WebSocket |
@@ -25,7 +47,7 @@
 | QQ 文本对话 | 可用 | @、句首唤醒词、全量回复、身份和群聊上下文 |
 | 图片理解 | 可用 | 当前消息多图输入，需要兼容多模态的文本模型 |
 | 聊天触发生图 | 可用 | 本地角色基底图 + 当前聊天参考图 |
-| 记忆系统 | 可用 | 短期上下文、长期摘要、跨会话事实 |
+| 记忆系统 | 可用 | 短期上下文、合并摘要、会话隔离自动事实 |
 | 主动发言 | 可用 | 间隔、冷却、阈值、上下文条数、目标群 |
 | Web 管理面板 | 可用 | 配置、记忆、测试、日志、脱敏诊断 |
 | MMD 桌宠 | 可用 | 模型、VMD、表情、注视、点击和事件状态 |
@@ -44,11 +66,11 @@ NapCat / OneBot v11 reverse WebSocket
     ▼
 server.js
     ├── lib/message-handler.js
-    │      ├── trigger / identity / session queue
+    │      ├── message-chain / conversation-runtime / session queue
     │      ├── lib/chat-completion.js
     │      ├── lib/vision.js
     │      ├── lib/image-gen.js
-    │      └── send_msg -> NapCat -> QQ
+    │      └── qq-transport -> send_msg -> echo acknowledgement
     ├── REST management API -> React WebUI
     ├── WebSocket logs / pet:event -> WebUI and pet renderer
     ├── lib/memory.js -> local JSON stores
@@ -86,7 +108,10 @@ Electron main process
 | `lib/vision.js` | OneBot 图片提取、受控下载和多模态内容构建 |
 | `lib/image-gen.js` | 文生图/参考图请求与角色基底优先级 |
 | `lib/memory.js` | 会话、摘要、持久化事实和摘要触发 |
-| `lib/proactive.js` | 群聊观察、主动发言判断、冷却和目标群筛选 |
+| `lib/message-chain.js` | 消息段标准化、自身过滤、引用与触发 |
+| `lib/conversation-runtime.js` | 会话队列、事件去重、观察水位、失效令牌和复读检查 |
+| `lib/qq-transport.js` | 消息段输出、echo 回执、超时与断连结果 |
+| `lib/proactive.js` | 新消息驱动的主动判断、普通回复优先、冷却和目标群筛选 |
 | `lib/desktop-awareness.js` | 桌面画面模型请求、输出规范化和互动冷却 |
 | `lib/config.js` | 配置加载、保存、API Key 环境变量覆盖和脱敏 |
 | `lib/schemas.js` | 配置、会话、摘要和事实的 Zod 边界 |
@@ -282,7 +307,7 @@ Electron main process
 
 - 为管理 API 增加默认关闭、可选启用的本地访问 token。
 - 评估 Electron `safeStorage` 与普通 Node 模式兼容的 Key 存储方案。
-- 为智能分段、主动发言兼容解析和摘要触发补充边界测试。
+- 持续用真实运行日志评估主动参与质量；已有分段顺序、主动竞争、JSON 严格解析、回执和复读回归用例。
 - 拆分桌宠大体积依赖，降低首次加载和构建 chunk 体积。
 
 ### P2：桌宠体验

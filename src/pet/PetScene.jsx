@@ -10,7 +10,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
 import { MMDAnimationHelper } from 'three/examples/jsm/animation/MMDAnimationHelper.js';
-import { OutlineEffect } from 'three/examples/jsm/effects/OutlineEffect.js';
+import { StarRailToonPipeline } from './rendering/StarRailToonPipeline';
 import { API_BASE_URL } from '../lib/api';
 import { DEFAULT_PET_MANIFEST, loadPetManifest } from './config/petManifest';
 import { usePetEvents } from './hooks/usePetEvents';
@@ -20,6 +20,9 @@ import { LookAtController } from './runtime/LookAtController';
 import { inspectMmdModel } from './runtime/modelDiagnostics';
 import { MotionController } from './runtime/MotionController';
 import PetOverlay from './ui/PetOverlay';
+import { PetBehavior } from './runtime/PetBehavior';
+import { HandDragController } from './runtime/HandDragController';
+import { createCompanionMotions } from './runtime/companionMotions';
 
 const BASE_WIDTH = 250;
 const BASE_HEIGHT = 400;
@@ -27,7 +30,8 @@ const MIN_SPEECH_HEADROOM = 64;
 const MAX_SPEECH_HEADROOM = 500;
 const MAX_RENDERED_SPEECH_LENGTH = 1000;
 const PET_SCALE_KEY = 'hyacine-pet-scale';
-const DIRECT_INTERACTION_PRIORITY = 40;
+const ROAMING_KEY = 'hyacine-window-roaming';
+const STATE_LABELS = { mantling: '翻越', pointerNotice: '注视', pointerFocus: '注视', clinging: '抓握', idle: '休息中', walking: '散步中', climbing: '攀爬中', falling: '落下中', landing: '站稳啦', thinking: '思考中', working: '创作中', speaking: '说话中', dragging: '被拎起来了', greet: '打招呼', tapHead: '摸摸头', tapBody: '回应你', attention: '听你说', error: '有点困惑' };
 
 function loadPetScale() {
     // localStorage 属于 renderer；原生窗口尺寸由后续 effect 通过 preload 同步。
@@ -85,11 +89,15 @@ export default function PetScene() {
     const petScaleDraftRef = useRef(loadPetScale());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const [showMenu, setShowMenu] = useState(false);
-    const [passthrough, setPassthrough] = useState(false);
+    const [showSizePanel, setShowSizePanel] = useState(false);
+    const interactionReasons = useRef(new Set());
+    const uiPausedRef = useRef(false);
     const [petScale, setPetScale] = useState(loadPetScale);
     const [petScaleDraft, setPetScaleDraft] = useState(loadPetScale);
     const [speech, setSpeech] = useState('');
+    const [behaviorState, setBehaviorState] = useState('idle');
+    const [windowState, setWindowState] = useState(null);
+    const nativeStateRef = useRef(null);
     const [speechHeadroom, setSpeechHeadroom] = useState(0);
 
     const showSpeech = useCallback((text, duration) => {
@@ -110,51 +118,49 @@ export default function PetScene() {
         setSpeechHeadroom(previous => Math.abs(previous - nextHeight) > 1 ? nextHeight : previous);
     }, []);
 
-    const triggerDefinition = useCallback((definition, kind = 'event', detail = {}) => {
-        // definition 来自 manifest；动作和表情互相独立，缺少其一时另一项仍可执行。
+    const handlePetEvent = useCallback((event, detail = {}) => {
         const state = sceneRef.current;
-        if (!state || !definition) return { motionPlayed: false, expressionPlayed: false };
-        let motionPlayed = false;
-        let expressionPlayed = false;
-        if (definition.motion) {
-            motionPlayed = Boolean(state.motionController?.play(definition.motion, {
-                kind,
-                priority: detail.priority ?? definition.priority,
-                cooldown: definition.cooldown,
-                duration: detail.duration,
-            }));
-        }
-        if (definition.expression) {
-            expressionPlayed = Boolean(state.expressionController?.play(definition.expression, {
-                duration: Number(detail.duration) || Number(definition.duration) || 1.2,
-            }));
-        }
-        return { motionPlayed, expressionPlayed };
-    }, []);
-
-    const handlePetEvent = useCallback((event, detail) => {
-        // 后端只发 attention/desktopComment 等语义，不知道具体 VMD/Morph 名称。
-        // desktopComment 缺少专用映射时回退 speaking，保持旧 manifest 兼容。
-        const state = sceneRef.current;
-        const definition = event === 'desktopComment'
-            ? state?.manifest?.events?.desktopComment || state?.manifest?.events?.speaking
-            : state?.manifest?.events?.[event];
-        const result = triggerDefinition(definition, event === 'error' ? 'system' : 'event', detail);
-        // 本地可能只有 thinking/idle，没有 speaking、magic 或 confused VMD。
-        // 这些完成类事件缺少对应动作时仍要退出循环思考，不能一直卡在 thinking。
-        if (['speaking', 'imageGenerating', 'error'].includes(event) && !result.motionPlayed) {
-            state?.motionController?.returnToIdle();
-        }
-        if (event === 'speaking' || event === 'desktopComment') {
-            state?.expressionController?.speak(Number(detail.duration) || 1.5);
-        }
-        if (event === 'desktopComment' && detail.text) {
-            const duration = Math.max(4, Math.min(12, Number(detail.duration) || 6));
-            showSpeech(detail.text, duration);
-        }
-    }, [showSpeech, triggerDefinition]);
+        state?.behavior?.event(event, detail);
+        const definition = state?.manifest?.events?.[event];
+        if (definition?.expression) state?.expressionController?.play(definition.expression, { duration: Number(detail.duration) || 1.5 });
+        if (event === 'speaking' || event === 'desktopComment') state?.expressionController?.speak(Number(detail.duration) || 4);
+        if (event === 'desktopComment' && detail.text) showSpeech(detail.text, Math.max(4, Math.min(12, Number(detail.duration) || 6)));
+    }, [showSpeech]);
 
     usePetEvents(handlePetEvent);
+
+    useEffect(() => {
+        const api = window.electronAPI;
+        if (!api?.onWindowCompanion) return;
+        let alive = true;
+        const receive = state => {
+            if (!alive || !state) return;
+            nativeStateRef.current = state;
+            setWindowState(state);
+            try { localStorage.setItem(ROAMING_KEY, String(state.enabled)); } catch { /* Session preference. */ }
+            sceneRef.current?.behavior?.setInteracting(uiPausedRef.current || Boolean(state.interactionPaused));
+            sceneRef.current?.behavior?.setLocomotion(state.state);
+        };
+        const unsubscribe = api.onWindowCompanion(receive);
+        api.getWindowCompanion().then(receive).catch(() => {});
+        let enabled = true;
+        try { enabled = localStorage.getItem(ROAMING_KEY) !== 'false'; } catch { /* Session preference. */ }
+        api.setWindowRoaming(enabled).catch(() => {});
+        return () => { alive = false; unsubscribe?.(); api.pauseWindowRoaming(false); };
+    }, []);
+
+    const setInteraction = useCallback((reason, active) => {
+        if (active) interactionReasons.current.add(reason); else interactionReasons.current.delete(reason);
+        const paused = interactionReasons.current.size > 0;
+        uiPausedRef.current = paused;
+        sceneRef.current?.behavior?.setInteracting(paused || Boolean(nativeStateRef.current?.interactionPaused));
+        window.electronAPI?.pauseWindowRoaming?.(paused, [...interactionReasons.current].some(item => item !== 'hover') ? 'controls' : 'pointer');
+    }, []);
+    const closeSizePanel = useCallback(() => {
+        setPetScale(petScaleDraftRef.current);
+        setShowSizePanel(false);
+        setInteraction('panel', false);
+    }, [setInteraction]);
 
     useEffect(() => {
         try {
@@ -164,16 +170,11 @@ export default function PetScene() {
         }
         // 高度包含 speechHeadroom，并要求主进程固定底边，角色脚部不会随气泡上下跳动。
         window.electronAPI?.resizePetWindow?.(
-            BASE_WIDTH * petScale,
+            Math.max(BASE_WIDTH * petScale, showSizePanel ? 264 : 0),
             BASE_HEIGHT * petScale + speechHeadroom,
             true
         );
-    }, [petScale, speechHeadroom]);
-
-    useEffect(() => {
-        const unsubscribe = window.electronAPI?.onPassthroughChanged?.(setPassthrough);
-        return () => unsubscribe?.();
-    }, []);
+    }, [petScale, speechHeadroom, showSizePanel]);
 
     useEffect(() => {
         const unsubscribe = window.electronAPI?.onGlobalCursorMoved?.(({ x, y, windowBounds }) => {
@@ -184,9 +185,7 @@ export default function PetScene() {
             if (rect.width <= 0 || rect.height <= 0) return;
             const localX = x - windowBounds.x - rect.left;
             const localY = y - windowBounds.y - rect.top;
-            const normalizedX = (localX / rect.width) * 2 - 1;
-            const normalizedY = (localY / rect.height) * 2 - 1;
-            state.lookAtController?.setTarget(normalizedX, normalizedY);
+            state.cursor = { x: localX, y: localY, receivedAt: performance.now() };
         });
         return () => unsubscribe?.();
     }, []);
@@ -213,57 +212,85 @@ export default function PetScene() {
         showSpeech(message, result?.ok ? 2.5 : 3.5);
     }, [showSpeech]);
 
-    const handleMouseMove = useCallback((event) => {
-        const state = sceneRef.current;
-        if (!state) return;
-        const rect = mountRef.current?.getBoundingClientRect();
-        if (!rect || rect.width <= 0 || rect.height <= 0) return;
-        state.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-        state.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-        if (state.isDragging && window.electronAPI) {
-            // 原生无边框窗口不能依赖系统标题栏拖动，通过 preload 把屏幕坐标交给主进程。
-            window.electronAPI.dragMove(event.screenX, event.screenY);
-            return;
-        }
-
-        // Raycaster 决定本次按下是模型点击互动还是空白区域拖动窗口。
-        state.raycaster.setFromCamera(state.mouse, state.camera);
-        const intersection = state.model
-            ? state.raycaster.intersectObject(state.model, true)[0]
-            : null;
-        state.isHovering = Boolean(intersection);
-        state.hoverRegion = intersection ? getHitRegion(state.model, intersection.point) : null;
-        event.currentTarget.style.cursor = state.isHovering ? 'pointer' : 'grab';
-    }, []);
-
-    const handleMouseDown = useCallback((event) => {
-        if (event.button !== 0) return;
-        setShowMenu(false);
-        const state = sceneRef.current;
-        if (!state || state.isHovering) return;
-        state.isDragging = true;
-        event.currentTarget.style.cursor = 'grabbing';
-        window.electronAPI?.dragStart?.(event.screenX, event.screenY);
-    }, []);
-
-    const endDrag = useCallback(() => {
-        const state = sceneRef.current;
-        if (!state?.isDragging) return;
-        state.isDragging = false;
-        window.electronAPI?.dragEnd?.();
-    }, []);
-
-    const handleClick = useCallback(() => {
-        setShowMenu(false);
-        const state = sceneRef.current;
-        if (!state?.isHovering || !state.hoverRegion) return;
-        // 用户主动点击应高于桌面分析等后台事件；否则循环 thinking 会让点击看似失效，
-        // 随后到达的 desktopAnalysisFinished 也可能在舞蹈中途强制切回待机。
-        triggerDefinition(state.manifest?.interactions?.[state.hoverRegion], 'reaction', {
-            priority: DIRECT_INTERACTION_PRIORITY,
+    useEffect(() => {
+        const unsubscribe = window.electronAPI?.onPetCommand?.(command => {
+            if (command === 'size') { setInteraction('panel', true); setShowSizePanel(true); }
+            if (command === 'close-controls') { closeSizePanel(); setInteraction('hover', false); }
+            if (command === 'greet') sceneRef.current?.behavior?.event('greet');
+            if (command === 'observe') void testDesktopAwareness();
         });
-    }, [triggerDefinition]);
+        const unsubscribeDrag = window.electronAPI?.onDragAnchor?.(anchor => {
+            const runtime = sceneRef.current;
+            if (!runtime) return;
+            runtime.dragAnchor = anchor;
+            if (anchor) runtime.handDrag?.start(anchor); else runtime.handDrag?.stop();
+        });
+        const cancelPointer = () => {
+            const state = sceneRef.current;
+            if (state?.press) {
+                if (state.isDragging) { window.electronAPI?.dragEnd?.({ cancelled: true }); state.handDrag?.stop(); state.behavior?.event('dragEnd'); }
+                state.press = null; state.isDragging = false;
+            }
+            setInteraction('pointer', false); setInteraction('hover', false);
+        };
+        window.addEventListener('blur', cancelPointer);
+        return () => { unsubscribe?.(); unsubscribeDrag?.(); window.removeEventListener('blur', cancelPointer); window.electronAPI?.pauseWindowRoaming?.(false); };
+    }, [closeSizePanel, setInteraction, testDesktopAwareness]);
+
+    const updateHit = useCallback(event => {
+        const state = sceneRef.current, rect = mountRef.current?.getBoundingClientRect();
+        if (!state || !rect?.width || !rect?.height) return null;
+        state.cursor = { x: event.clientX - rect.left, y: event.clientY - rect.top, receivedAt: performance.now() };
+        state.mouse.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+        state.raycaster.setFromCamera(state.mouse, state.camera);
+        const hit = state.model ? state.raycaster.intersectObject(state.model, true)[0] : null;
+        state.hoverRegion = hit ? getHitRegion(state.model, hit.point) : null;
+        return state;
+    }, []);
+
+    const handlePointerDown = useCallback(event => {
+        if (event.button !== 0 || event.target.closest('button, input, label, [data-pet-controls]')) return;
+        closeSizePanel();
+        const state = updateHit(event); if (!state?.model || !state.footPoint || !state.behavior) return;
+        state.press = { x: event.screenX, y: event.screenY, region: state.hoverRegion, pointerId: event.pointerId };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setInteraction('pointer', true);
+    }, [closeSizePanel, setInteraction, updateHit]);
+
+    const handlePointerMove = useCallback(event => {
+        const state = updateHit(event); if (!state) return;
+        if (state.press && !state.isDragging && Math.hypot(event.screenX - state.press.x, event.screenY - state.press.y) > 5) {
+            state.isDragging = true;
+            state.behavior?.event('dragStart');
+            window.electronAPI?.dragStart?.(state.press.x, state.press.y);
+        }
+        if (state.isDragging) {
+            state.handDrag?.dynamics.sample(event.screenX, performance.now());
+            window.electronAPI?.dragMove?.(event.screenX, event.screenY);
+        }
+        event.currentTarget.style.cursor = state.isDragging ? 'grabbing' : state.hoverRegion ? 'pointer' : 'grab';
+    }, [updateHit]);
+
+    const handlePointerEnd = useCallback(event => {
+        const state = sceneRef.current;
+        if (!state?.press) return;
+        const wasDragging = state.isDragging;
+        if (wasDragging) {
+            state.isDragging = false;
+            const rect = mountRef.current.getBoundingClientRect();
+            const foot = state.footPoint.clone().applyMatrix4(state.model.matrixWorld).project(state.camera);
+            window.electronAPI?.dragEnd?.({ foot: { x: rect.left + (foot.x + 1) * rect.width / 2, y: rect.top + (1 - foot.y) * rect.height / 2 }, cancelled: event.type !== 'pointerup' });
+            state.handDrag?.stop();
+            state.behavior?.event('dragEnd');
+        } else if (event.type === 'pointerup' && state.press.region) {
+            const definition = state.manifest.interactions[state.press.region];
+            state.behavior?.event(state.press.region === 'head' ? 'tapHead' : 'tapBody');
+            if (definition?.expression) state.expressionController?.play(definition.expression, { duration: 2 });
+        }
+        state.press = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        setInteraction('pointer', false);
+    }, [setInteraction]);
 
     const openConfig = useCallback(() => {
         if (window.electronAPI?.openConfig) window.electronAPI.openConfig();
@@ -294,19 +321,8 @@ export default function PetScene() {
         renderer.setSize(container.clientWidth, container.clientHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.setClearColor(0x000000, 0);
-        renderer.outputColorSpace = THREE.SRGBColorSpace;
-        renderer.toneMapping = THREE.NoToneMapping;
+        const toonPipeline = new StarRailToonPipeline(renderer);
         container.appendChild(renderer.domElement);
-
-        const outlineEffect = new OutlineEffect(renderer, {
-            defaultThickness: 0.003,
-            defaultColor: [0.2, 0.15, 0.15],
-            defaultAlpha: 0.8,
-        });
-        scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-        const mainLight = new THREE.DirectionalLight(0xffffff, 1);
-        mainLight.position.set(2, 5, 8);
-        scene.add(mainLight);
 
         // runtime 是渲染循环、DOM 事件和 WebSocket 回调共享的可变状态容器。
         const runtime = {
@@ -364,18 +380,15 @@ export default function PetScene() {
             mesh.geometry.computeBoundingBox();
             scene.add(mesh);
 
-            const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-            materials.filter(Boolean).forEach(material => {
-                if (!material.isMeshToonMaterial) return;
-                material.alphaToCoverage = true;
-                material.depthWrite = true;
-                material.color.multiplyScalar(1.3);
-                material.emissive = material.color.clone();
-                material.emissiveIntensity = 0.6;
-            });
+            toonPipeline.configure(mesh);
+            // 在 helper/动作启动前捕获模型的中立眼骨姿态。
+            runtime.lookAtController = new LookAtController(mesh, runtime.manifest.bones);
+            runtime.handDrag = new HandDragController(mesh);
 
             // 动作属于可选能力，部分加载失败只记录诊断，不让整个模型初始化失败。
-            const { motions, errors: motionErrors } = await loadManifestMotions(loader, mesh, runtime.manifest.motions);
+            const builtInMotions = createCompanionMotions(mesh);
+            const { motions: externalMotions, errors: motionErrors } = await loadManifestMotions(loader, mesh, runtime.manifest.motions, builtInMotions);
+            const motions = { ...builtInMotions, ...externalMotions };
             if (disposed) return;
             motionErrors.forEach(item => console.warn(`[Pet] Motion failed: ${item.name} (${item.file})`, item.message));
             Object.entries(motions).forEach(([name, motion]) => {
@@ -389,11 +402,24 @@ export default function PetScene() {
                 physics: hasPhysics,
             });
 
-            runtime.motionController = new MotionController({ helper, mesh, motions });
+            runtime.motionController = new MotionController({ helper, mesh, motions, onFinished: () => true });
             runtime.expressionController = new ExpressionController(mesh, runtime.manifest.expressions);
-            runtime.lookAtController = new LookAtController(mesh, runtime.manifest.bones);
             runtime.capabilities = inspectMmdModel(mesh, runtime.manifest, hasPhysics);
-            runtime.motionController.play('idle', { force: true, loop: true });
+            runtime.behavior = new PetBehavior({
+                now: () => runtime.time,
+                onChange: (name, { busy }) => {
+                    const mapped = runtime.manifest.states?.[name]?.motion || name;
+                    runtime.motionController.play(runtime.motionController.has(mapped) ? mapped : name, { force: true });
+                    setBehaviorState(name);
+                    window.electronAPI?.setPetBusy?.(busy);
+                },
+            });
+            runtime.behavior.setInteracting(uiPausedRef.current || Boolean(nativeStateRef.current?.interactionPaused));
+            runtime.behavior.setLocomotion(nativeStateRef.current?.state || 'idle');
+            if (!runtime.behavior.interacting) runtime.behavior.event('greet');
+            runtime.footPoint = new THREE.Vector3(0, mesh.geometry.boundingBox.min.y, 0);
+            runtime.motionSources = Object.fromEntries(Object.entries(motions).map(([name, motion]) => [name, motion.source || 'vmd']));
+            onResize();
             setLoading(false);
         };
 
@@ -408,9 +434,21 @@ export default function PetScene() {
         const onResize = () => {
             const width = container.clientWidth;
             const height = container.clientHeight;
+            if (!runtime.isDragging) camera.zoom = 1;
             camera.aspect = width / height;
             camera.updateProjectionMatrix();
             renderer.setSize(width, height);
+            if (runtime.footPoint && runtime.model && !runtime.isDragging) {
+                // Project a stable rest-pose foot point, never the animated ankle/bounding box.
+                const point = runtime.footPoint.clone().multiplyScalar(1.2).project(camera);
+                const rect = container.getBoundingClientRect();
+                window.electronAPI?.setPetMetrics?.({
+                    anchorX: rect.left + (point.x + 1) * width / 2,
+                    anchorY: rect.top + (1 - point.y) * height / 2,
+                    radius: Math.max(12, width * 0.12),
+                    height: height * 0.8,
+                });
+            }
         };
         window.addEventListener('resize', onResize);
 
@@ -429,10 +467,18 @@ export default function PetScene() {
                 }
                 return {
                     canvas: { width, height },
+                    drag: runtime.handDrag?.snapshot(camera, container.clientWidth, container.clientHeight),
                     nonTransparentPixels,
                     coverage: nonTransparentPixels / Math.max(1, width * height),
                     modelLoaded: Boolean(runtime.model),
                     motion: runtime.motionController?.state || 'loading',
+                    behavior: runtime.behavior?.current,
+                    motionTime: runtime.motionController?.current?.action?.time,
+                    motionPaused: runtime.motionController?.current?.action?.paused,
+                    motionSources: runtime.motionSources,
+                    rendering: toonPipeline.snapshot(),
+                    gaze: runtime.lookAtController?.snapshot(),
+                    windowCompanion: nativeStateRef.current,
                     expressions: runtime.expressionController?.snapshot() || null,
                     capabilities: runtime.capabilities || null,
                 };
@@ -442,7 +488,29 @@ export default function PetScene() {
             animationFrame = requestAnimationFrame(animate);
             const delta = Math.min(clock.getDelta(), 0.05);
             if (document.hidden) return;
+            runtime.handDrag?.restore();
+            const zoom = runtime.dragAnchor ? Math.max(0.1, (runtime.dragAnchor.baseHeight - (container.offsetTop || 0)) / container.clientHeight) : 1;
+            if (camera.zoom !== zoom) { camera.zoom = zoom; camera.updateProjectionMatrix(); }
             runtime.time += delta;
+            runtime.behavior?.update();
+            const nativeState = nativeStateRef.current;
+            if (runtime.model) {
+                const moving = ['walking', 'climbing', 'clinging', 'mantling'].includes(runtime.behavior?.current);
+                const targetAngle = moving ? (nativeState?.direction || 1) * (['climbing', 'clinging', 'mantling'].includes(runtime.behavior.current) ? 1.05 : 0.8) : 0;
+                runtime.model.rotation.y += (targetAngle - runtime.model.rotation.y) * (1 - Math.exp(-6 * delta));
+                // Interaction clips keep playing (breathing, settling and looking), never freeze a frame.
+                const action = runtime.motionController?.current?.action;
+                if (action) {
+                    action.paused = false;
+                    if (runtime.behavior?.current === 'mantling') {
+                        action.time = Math.max(0, Math.min(1, nativeState?.progress || 0)) * action.getClip().duration;
+                        action.setEffectiveTimeScale(0);
+                    } else if (runtime.behavior?.current === 'climbing') {
+                        action.time = (nativeState?.cycle || 0) * action.getClip().duration;
+                        action.setEffectiveTimeScale(0);
+                    }
+                }
+            }
 
             // 顺序很重要：撤销上一帧视线 -> 完成动作过渡 -> VMD/物理更新 -> Morph ->
             // 重新叠加视线 -> 渲染。交换顺序会导致头部偏移累积或被动作覆盖。
@@ -457,8 +525,16 @@ export default function PetScene() {
                 runtime.model.rotation.z = Math.sin(runtime.time * 0.7) * 0.01;
             }
             runtime.expressionController?.update(delta);
+            if (['walking', 'climbing', 'dragging', 'falling'].includes(runtime.behavior?.current)) {
+                runtime.lookAtController?.setTarget(0, runtime.behavior.current === 'climbing' ? -0.35 : 0);
+            } else if (runtime.cursor && performance.now() - runtime.cursor.receivedAt < 350) {
+                runtime.model?.updateMatrixWorld(true);
+                runtime.lookAtController?.setPointerTarget(runtime.cursor.x, runtime.cursor.y, camera, container.clientWidth, container.clientHeight);
+            }
             runtime.lookAtController?.update(delta);
-            outlineEffect.render(scene, camera);
+            if (runtime.dragAnchor && runtime.handDrag?.target) runtime.handDrag.target = { x: runtime.dragAnchor.x, y: runtime.dragAnchor.y - container.getBoundingClientRect().top };
+            runtime.handDrag?.update(delta, camera, container.clientWidth, container.clientHeight);
+            toonPipeline.render(scene, camera);
         };
         animate();
 
@@ -468,6 +544,7 @@ export default function PetScene() {
             disposed = true;
             cancelAnimationFrame(animationFrame);
             window.removeEventListener('resize', onResize);
+            window.electronAPI?.setPetBusy?.(false);
             runtime.motionController?.dispose();
             runtime.expressionController?.dispose();
             runtime.lookAtController?.dispose();
@@ -489,29 +566,30 @@ export default function PetScene() {
         <div
             className={`pet-root ${speechHeadroom > 0 ? 'pet-root-with-speech' : ''}`}
             style={{ '--pet-speech-headroom': `${speechHeadroom}px` }}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={endDrag}
-            onMouseLeave={endDrag}
-            onContextMenu={(event) => { event.preventDefault(); setShowMenu(true); }}
-            onClick={handleClick}
-            onDoubleClick={openConfig}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerEnd}
+            onPointerCancel={handlePointerEnd}
+            onPointerEnter={() => setInteraction('hover', true)}
+            onPointerLeave={() => setInteraction('hover', false)}
+            onLostPointerCapture={handlePointerEnd}
+            onContextMenu={event => { event.preventDefault(); window.electronAPI?.showPetMenu?.(); }}
+            onDoubleClick={event => { if (!event.target.closest('[data-pet-controls]')) openConfig(); }}
         >
             <div ref={mountRef} className="pet-canvas" />
             <PetOverlay
                 loading={loading}
+                behaviorLabel={STATE_LABELS[behaviorState] || '待机'}
+                windowState={windowState}
                 error={error}
                 speech={speech}
-                showMenu={showMenu}
-                passthrough={passthrough}
+                showSizePanel={showSizePanel}
                 petScale={petScaleDraft}
-                onCloseMenu={() => setShowMenu(false)}
-                onOpenConfig={openConfig}
-                onTogglePassthrough={() => window.electronAPI?.togglePassthrough?.()}
+                onCloseSizePanel={closeSizePanel}
                 onScaleChange={updatePetScaleDraft}
                 onScaleCommit={commitPetScale}
+                onScaleSelect={value => { updatePetScaleDraft({ target: { value } }); commitPetScale(); }}
                 onSpeechHeightChange={updateSpeechHeight}
-                onTestDesktopAwareness={testDesktopAwareness}
             />
         </div>
     );

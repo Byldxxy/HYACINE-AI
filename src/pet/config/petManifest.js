@@ -3,15 +3,16 @@
  *
  * manifest 只描述“资源和语义事件如何映射”，不保存角色台词或 API 配置。用户文件通过
  * VITE_PET_MANIFEST_PATH 指定；缺少字段时与默认值深度合并，使只有模型、没有动作的
- * A-pose 资源也能降级显示。骨骼/Morph 使用候选名称数组以兼容不同 MMD 作者的命名。
+ * 模型资源也能使用内置动作。骨骼/Morph 使用候选名称数组以兼容不同 MMD 作者的命名。
  */
 const DEFAULT_MODEL_PATH = import.meta.env.VITE_PET_MODEL_PATH || '/models/desktop-pet.pmx';
-const MANIFEST_PATH = import.meta.env.VITE_PET_MANIFEST_PATH || '';
+const MANIFEST_PATH = import.meta.env.VITE_PET_MANIFEST_PATH || '/pet-manifest.json';
 
 export const DEFAULT_PET_MANIFEST = {
-    version: 1,
+    version: 2,
     model: DEFAULT_MODEL_PATH,
     motions: {},
+    states: {},
     bones: {
         head: ['頭', 'Head', 'head'],
         eyes: ['両目', 'Eyes', 'eyes'],
@@ -31,12 +32,13 @@ export const DEFAULT_PET_MANIFEST = {
     events: {
         attention: { motion: 'attention', expression: 'surprised' },
         thinking: { motion: 'thinking' },
-        desktopAnalysisFinished: { motion: 'idle', priority: 30 },
+        desktopAnalysisFinished: {},
+        taskFinished: {},
         speaking: { motion: 'speaking', expression: 'smile' },
         desktopComment: { motion: 'speaking', expression: 'smile' },
-        imageGenerating: { motion: 'magic', expression: 'smile' },
+        imageGenerating: { motion: 'working', expression: 'smile' },
         proactive: { motion: 'greet', expression: 'smile' },
-        error: { motion: 'confused', expression: 'sad' },
+        error: { motion: 'error', expression: 'sad' },
     },
 };
 
@@ -48,6 +50,7 @@ function asStringArray(value, fallback) {
 
 function normalizeManifest(input = {}) {
     // 顶层展开不足以保护 bones/expressions 等嵌套结构，因此这些字段单独规范化合并。
+    if (!input || typeof input !== 'object' || Array.isArray(input)) input = {};
     const bones = input.bones || {};
     const expressions = input.expressions || {};
     return {
@@ -57,7 +60,8 @@ function normalizeManifest(input = {}) {
         model: typeof input.model === 'string' && input.model.trim()
             ? input.model
             : DEFAULT_MODEL_PATH,
-        motions: input.motions && typeof input.motions === 'object' ? input.motions : {},
+        motions: input.motions && typeof input.motions === 'object' && !Array.isArray(input.motions) ? input.motions : {},
+        states: input.states && typeof input.states === 'object' && !Array.isArray(input.states) ? input.states : {},
         bones: {
             head: asStringArray(bones.head, DEFAULT_PET_MANIFEST.bones.head),
             eyes: asStringArray(bones.eyes, DEFAULT_PET_MANIFEST.bones.eyes),
@@ -80,7 +84,7 @@ function normalizeManifest(input = {}) {
 }
 
 export async function loadPetManifest() {
-    // 未配置 manifest 是正常场景，直接使用默认模型路径和无动作降级运行时。
+    // 可选本地 manifest；资源缺失时由 PetScene 使用内置动作。
     if (!MANIFEST_PATH) return { manifest: DEFAULT_PET_MANIFEST, source: 'default' };
 
     const response = await fetch(MANIFEST_PATH, { cache: 'no-store' });

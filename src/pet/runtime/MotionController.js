@@ -23,11 +23,12 @@ function asNonNegativeSeconds(value, fallback) {
 }
 
 export class MotionController {
-    constructor({ helper, mesh, motions, onStateChange }) {
+    constructor({ helper, mesh, motions, onStateChange, onFinished }) {
         this.helper = helper;
         this.mesh = mesh;
         this.motions = motions;
         this.onStateChange = onStateChange;
+        this.onFinished = onFinished;
         this.current = null;
         this.lastPlayedAt = new Map();
         this.transitions = [];
@@ -43,6 +44,7 @@ export class MotionController {
     handleFinished = (event) => {
         // Mixer 可能同时发出旧 action 的 finished，只响应当前动作，避免错误切回 idle。
         if (!this.current || event.action !== this.current.action) return;
+        if (this.onFinished?.(this.current.name) === true) return;
         if (this.current.name !== 'idle') this.returnToIdle();
     };
 
@@ -161,7 +163,7 @@ export class MotionController {
         if (!options.force && priority < currentPriority) return false;
 
         const cooldown = Number(options.cooldown ?? definition.cooldown ?? 0);
-        const lastPlayed = this.lastPlayedAt.get(name) || 0;
+        const lastPlayed = this.lastPlayedAt.get(name) ?? -Infinity;
         if (!options.force && cooldown > 0 && performance.now() - lastPlayed < cooldown * 1000) return false;
 
         // 循环思考、待机等事件可能重复到达。保持当前 action 可避免同一 clip 从首帧硬跳。
@@ -198,7 +200,7 @@ export class MotionController {
             action,
             priority,
             definition,
-            durationRemaining: duration > 0 && !loop ? duration : null,
+            durationRemaining: duration > 0 ? duration : null,
         };
         this.lastPlayedAt.set(name, performance.now());
         this.onStateChange?.(name);

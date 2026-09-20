@@ -115,3 +115,44 @@ test('starts an isolated backend and validates management API boundaries', async
     assert.equal(serialized.includes('private-provider'), false);
     assert.equal(serialized.includes('PRIVATE INTEGRATION PROMPT'), false);
 });
+
+test('real reverse WebSocket routes receipts, deduplicates reconnects and ignores frontend/self messages', async (t) => {
+    const http = require('node:http');
+    const { WebSocket } = require('ws');
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hyacine-qq-'));
+    let requests = 0;
+    const provider = http.createServer(async (req, res) => {
+        for await (const _chunk of req) { /* Drain this isolated test request. */ }
+        requests++;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: '这是本轮的回复。' } }] }));
+    });
+    try { await new Promise((resolve, reject) => { provider.once('error', reject); provider.listen(0, '127.0.0.1', resolve); }); }
+    catch (error) { await fs.rm(directory, { recursive: true, force: true }); if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('loopback unavailable'); return; } throw error; }
+    const port = await getAvailablePort();
+    const child = spawn(process.execPath, ['server.js'], { cwd: projectRoot, env: { ...process.env, API_KEY: '', API_PORT: String(port), BIND_HOST: '127.0.0.1', ELECTRON_DESKTOP_PET: '0', HYACINE_DATA_DIR: directory, HYACINE_RUNTIME_ROOT: projectRoot, NODE_ENV: 'test' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const sockets = [];
+    t.after(async () => { for (const ws of sockets) ws.terminate(); if (child.exitCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); } await new Promise(resolve => provider.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
+    await waitForReady(child);
+    const url = `http://127.0.0.1:${port}`;
+    await fetch(`${url}/api/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ botQQ: '999', apiKey: 'fake-key', apiEndpoint: `http://127.0.0.1:${provider.address().port}/v1`, modelName: 'fake', enableSplit: false, enableProactive: false }) });
+    const connect = async () => { const ws = new WebSocket(`ws://127.0.0.1:${port}`); sockets.push(ws); await once(ws, 'open'); return ws; };
+    const first = await connect(), second = await connect(), ui = await connect(); const uiLogs = []; ui.on('message', data => uiLogs.push(data.toString())); ui.send('iam_frontend');
+    const incoming = id => ({ post_type: 'message', self_id: 999, message_type: 'group', group_id: 100, user_id: 20, message_id: id, message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '请回答' } }] });
+    const packets = []; first.on('message', data => { const p = JSON.parse(data); if (p.action) packets.push({ ws: first, p }); }); second.on('message', data => { const p = JSON.parse(data); if (p.action) packets.push({ ws: second, p }); });
+    const until = async condition => { for (let i = 0; i < 100; i++) { if (await condition()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('condition timeout'); };
+    ui.send(JSON.stringify(incoming(1))); first.send(JSON.stringify(incoming(1))); second.send(JSON.stringify(incoming(1)));
+    await until(() => packets.length === 1);
+    assert.equal(requests, 1);
+    assert.deepEqual(await fetch(`${url}/api/memory/group_100`).then(r => r.json()), []);
+    const { ws, p } = packets[0]; assert.equal(p.params.message.at(-1).type, 'text');
+    ws.send(JSON.stringify({ echo: p.echo, status: 'ok', retcode: 0, data: { message_id: 77 } }));
+    await until(async () => (await fetch(`${url}/api/memory/group_100`).then(r => r.json())).length === 2);
+    first.send(JSON.stringify({ ...incoming(2), user_id: 999 })); first.send('{bad json'); second.send(JSON.stringify(incoming(1)));
+    // A distinct later question proves the connection and queue are still functional.
+    const next = incoming(3); next.message[1].data.text = '第二个问题'; second.send(JSON.stringify(next));
+    await until(() => packets.length === 2); assert.equal(requests, 2);
+    const last = packets[1]; last.ws.send(JSON.stringify({ echo: last.p.echo, status: 'failed', retcode: 100, data: null }));
+    await until(() => uiLogs.some(line => line.includes('回复中止'))); // Wait for the failed receipt to be handled.
+    assert.equal((await fetch(`${url}/api/memory/group_100`).then(r => r.json())).length, 2);
+});

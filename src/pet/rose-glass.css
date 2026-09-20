@@ -1,0 +1,56 @@
+/* Pet window surfaces. Never imported by the WebUI. */
+:root {
+  --rose-ink: #513a4c;
+  --rose-body: #70586a;
+  --rose-muted: #927889;
+  --rose-accent: #b94f83;
+  --rose-blush: #edb6d1;
+  --rose-line: rgba(177, 105, 141, .18);
+  --rose-glass: linear-gradient(145deg, rgba(255, 250, 253, .83), rgba(248, 223, 238, .64) 65%, rgba(238, 226, 249, .7));
+  --rose-shadow: 0 4px 16px rgba(117, 66, 97, .08), inset 0 1px 0 rgba(255, 255, 255, .94);
+  --rose-blur: blur(24px) saturate(1.25);
+  --rose-radius: 22px;
+  --rose-font: "SF Pro Rounded", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+.frost-surface {
+  color: var(--rose-ink);
+  border: 1px solid rgba(255, 255, 255, .85);
+  border-radius: var(--rose-radius);
+  background: var(--rose-glass);
+  box-shadow: var(--rose-shadow);
+  backdrop-filter: var(--rose-blur);
+  -webkit-backdrop-filter: var(--rose-blur);
+}
+.frost-icon-button {
+  display: inline-grid; place-items: center; flex-shrink: 0;
+  width: 28px; height: 28px; padding: 0;
+  border: 1px solid rgba(255,255,255,.8); border-radius: 10px;
+  background: rgba(255,255,255,.38); color: var(--rose-muted); cursor: pointer;
+  transition: background .18s, color .18s;
+}
+.frost-icon-button:hover { background: rgba(255,255,255,.85); color: var(--rose-accent); }
+.frost-icon-button:disabled { opacity: .35; cursor: default; }
+.frost-icon-button:focus-visible { outline: 2px solid #b94f83; outline-offset: 2px; }
+.frost-range {
+  appearance: none; -webkit-appearance: none; min-width: 0; width: 100%;
+  height: 24px; margin: 0; padding: 0; border: 0; border-radius: 999px;
+  background: transparent; cursor: pointer; accent-color: var(--rose-accent); touch-action: none;
+}
+.frost-range::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 99px; background: linear-gradient(90deg, #ce86af, #e6b5d0 55%, rgba(255,255,255,.8));
+  box-shadow: inset 0 1px 2px rgba(123,75,105,.1);
+}
+.frost-range::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none; width: 14px; height: 14px; margin-top: -4.5px;
+  border: 3px solid #fff6fc; border-radius: 50%; background: #ba6795;
+  box-shadow: 0 1px 6px rgba(147,73,113,.28); transition: box-shadow .18s;
+}
+.frost-range::-moz-range-track { height: 5px; border: 0; border-radius: 99px; background: #e7b9d2; }
+.frost-range::-moz-range-thumb { width: 10px; height: 10px; border: 3px solid #fff6fc; border-radius: 50%; background: #ba6795; }
+.frost-range:focus-visible { outline: none; }
+.frost-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px rgba(185,79,131,.22); }
+.frost-range:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px rgba(185,79,131,.22); }
+.frost-range:disabled { opacity: .4; cursor: default; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@supports not (backdrop-filter: blur(1px)) { .frost-surface { background: rgba(253,237,246,.97); } }
+@media (prefers-reduced-motion: reduce) { .frost-icon-button, .frost-range { transition: none; } }

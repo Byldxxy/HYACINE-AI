@@ -35,12 +35,53 @@ export function removeSolverOwnedTracks(clip, mesh) {
     return originalCount - clip.tracks.length;
 }
 
-export async function loadManifestMotions(loader, mesh, motionDefinitions = {}) {
+export async function loadManifestMotions(loader, mesh, motionDefinitions = {}, baseMotions = {}) {
     const entries = Object.entries(motionDefinitions).filter(([, definition]) => definition?.file);
     const settled = await Promise.allSettled(entries.map(async ([name, definition]) => {
         const clip = await loadAnimation(loader, definition.file, mesh);
         clip.name = name;
+        if (definition.inPlace) {
+            // Desktop movement belongs to Electron. Never play the VMD's 60-second world translation.
+            clip.tracks = clip.tracks.filter(track => !track.name.startsWith('.bones[全ての親]'));
+            const centerBone = mesh.skeleton.bones.find(b => b.name === 'センター');
+            const center = clip.tracks.find(t => t.name === '.bones[センター].position');
+            const zOffset = center && centerBone ? center.values[2] - centerBone.position.z : 0;
+            for (const track of clip.tracks) {
+                if (!/\.bones\[(センター|左足ＩＫ|右足ＩＫ|左足IK|右足IK)\]\.position$/.test(track.name)) continue;
+                const binding = THREE.PropertyBinding.parseTrackName(track.name);
+                const bone = mesh.skeleton.bones.find(b => b.name === binding.objectIndex);
+                const stride = THREE.MathUtils.clamp(Number(definition.strideScale) || 1, 0.2, 1.5);
+                for (let i = 0; i < track.values.length; i += 3) {
+                    track.values[i + 2] -= zOffset;
+                    if (bone) {
+                        track.values[i] = bone.position.x + (track.values[i] - bone.position.x) * stride;
+                        track.values[i + 2] = bone.position.z + (track.values[i + 2] - bone.position.z) * stride;
+                    }
+                }
+            }
+        }
         const removedSolverTracks = removeSolverOwnedTracks(clip, mesh);
+        const base = baseMotions[name]?.clip;
+        if (base) {
+            if (definition.additiveToBase) {
+                for (const track of clip.tracks) {
+                    const baseTrack = base.tracks.find(t => t.name === track.name);
+                    if (!baseTrack || !track.name.endsWith('.quaternion')) continue;
+                    const rest = new THREE.Quaternion().fromArray(baseTrack.values);
+                    for (let i = 0; i < track.values.length; i += 4) {
+                        new THREE.Quaternion().fromArray(track.values, i).premultiply(rest).toArray(track.values, i);
+                    }
+                }
+            }
+            const driven = new Set(clip.tracks.map(t => t.name));
+            // Missing body/IK channels hold the base pose rather than leaking the previous action.
+            for (const track of base.tracks) {
+                if (driven.has(track.name)) continue;
+                const size = track.getValueSize();
+                const value = Array.from(track.values.slice(0, size));
+                clip.tracks.push(new track.constructor(track.name, [0, Math.max(clip.duration, 0.1)], [...value, ...value]));
+            }
+        }
         return [name, { definition, clip, removedSolverTracks }];
     }));
 

@@ -80,97 +80,14 @@
   overflow-wrap: anywhere;
 }
 
-.pet-menu {
-  position: absolute;
-  z-index: 1000;
-  top: 50%;
-  left: 50%;
-  min-width: 190px;
-  transform: translate(-50%, -50%);
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  border-radius: 10px;
-  padding: 5px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 10px 28px rgba(120, 50, 90, 0.18);
-  backdrop-filter: blur(12px);
-}
-
-.pet-menu button {
-  display: flex;
-  width: 100%;
-  min-height: 38px;
-  align-items: center;
-  gap: 9px;
-  border: 0;
-  border-radius: 7px;
-  padding: 8px 10px;
-  color: #4b4b55;
-  background: transparent;
-  font-size: 12px;
-  font-weight: 600;
-  text-align: left;
-  cursor: pointer;
-}
-
-.pet-menu button:hover {
-  color: #db3c82;
-  background: rgba(252, 231, 243, 0.78);
-}
-
-.pet-menu button svg {
-  width: 15px;
-  height: 15px;
-}
-
-.pet-menu-check {
-  width: 14px;
-  height: 14px;
-  margin-left: auto;
-  border: 2px solid #bbb;
-  border-radius: 4px;
-}
-
-.pet-menu-check-on {
-  border-color: #ec4899;
-  background: #ec4899;
-  box-shadow: inset 0 0 0 2px white;
-}
-
-.pet-scale {
-  position: absolute;
-  z-index: 800;
-  bottom: 8px;
-  left: 50%;
-  display: flex;
-  height: 30px;
-  align-items: center;
-  gap: 6px;
-  transform: translateX(-50%);
-  border-radius: 9px;
-  padding: 4px 8px;
-  color: white;
-  background: rgba(30, 30, 34, 0.58);
-  backdrop-filter: blur(7px);
-  user-select: none;
-}
-
-.pet-scale svg {
-  width: 11px;
-  height: 11px;
-  opacity: 0.8;
-}
-
-.pet-scale input {
-  width: 72px;
-  height: 4px;
-  cursor: pointer;
-  accent-color: #ec4899;
-}
-
-.pet-scale span {
-  min-width: 30px;
-  color: #f9a8d4;
-  font-size: 10px;
-  font-weight: 700;
-  text-align: right;
-}
+/* Compact controls; these styles are only loaded by the pet window. */
+.pet-root { touch-action: none; user-select: none; }
+.pet-size-panel { position: absolute; z-index: 1000; box-sizing: border-box; max-width: 248px; padding: 10px 12px; border-radius: 12px; overflow: auto; }
+.pet-size-panel header { display: flex; align-items: center; gap: 8px; }
+.pet-size-title { color: var(--rose-ink); font-size: 12px; }
+.pet-size-panel output { margin-left: auto; font-size: 12px; color: var(--rose-body); font-variant-numeric: tabular-nums; }
+.pet-size-panel .frost-icon-button { width: 24px; height: 24px; border-radius: 7px; }
+.pet-scale { display: flex; align-items: center; gap: 9px; margin-top: 6px; }
+.pet-scale input { flex: 1; }
+.pet-speech { background: var(--rose-glass); color: var(--rose-ink); box-shadow: var(--rose-shadow); border-color: rgba(255,255,255,.85); backdrop-filter: var(--rose-blur); font-weight: 500; border-radius: 12px; }
+.pet-speech::after { background: rgba(250,230,242,.85); }

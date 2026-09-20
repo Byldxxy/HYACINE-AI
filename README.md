@@ -3,10 +3,14 @@
 一个面向 QQ 群聊的本地化 AI 机器人与桌宠项目。通过 NapCat / OneBot v11 接收 QQ 消息，连接 OpenAI Chat Completions 兼容模型，并提供角色设定、图片理解、生图、记忆、主动发言、Web 管理面板和 Electron 桌面互动。
 
 [![CI](https://github.com/Byldxxy/HYACINE-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/Byldxxy/HYACINE-AI/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v1.2.1-ef5da8)](https://github.com/Byldxxy/HYACINE-AI/tree/v1.2.1)
+[![Release](https://img.shields.io/badge/release-v1.2.2-ef5da8)](https://github.com/Byldxxy/HYACINE-AI/tree/v1.2.2)
 [![License](https://img.shields.io/badge/license-MIT-2f855a)](./LICENSE)
 
+- [群聊消息链与防复读](./BOT_LOGIC.md)：触发、旁听、主动发言、发送回执及记忆边界。
 - [零基础使用手册](./USER_GUIDE.md)：安装 Git/Node.js、拉取源码、运行测试、连接 NapCat、生成 Windows EXE。
+- [统一菜单与尺寸调整](./CONTROLS_GUIDE.md)：右键入口、交互暂停和屏幕边缘布局。
+- [角色渲染与瞳孔控制](./RENDERING_GUIDE.md)：三渲二着色、近距离视线跟随与验证。
+- [桌宠动作与窗口互动](./COMPANION_GUIDE.md)：状态机、配布来源、窗口散步与攀爬。
 - [项目维护跟踪](./PROJECT_TRACKER.md)：系统架构、模块职责、工程保障、验证状态、已知限制和路线图。
 
 ## 核心能力
@@ -17,7 +21,8 @@
 - 支持 @ 机器人、句首唤醒词和全量回复三种触发方式。
 - 识别群聊发送者昵称、QQ、主人身份和群聊环境。
 - 兼容 OpenAI Chat Completions 风格的文本模型服务。
-- 支持拟人化分段发送和会话重置指令。
+- 同一会话串行处理，支持分段回复、引用机器人消息继续对话和会话重置。
+- 消息 ID 去重、排除自身回声；收到 OneBot 成功回执才写入回复记忆，失败或未知结果不自动重发。
 
 ### 图片理解与生图
 
@@ -28,8 +33,8 @@
 
 ### 记忆与主动互动
 
-- 短期上下文窗口、长期摘要和跨会话事实记忆。
-- 群聊主动发言支持检查间隔、冷却、置信度、上下文条数和目标群配置。
+- 短期上下文窗口、合并式长期摘要、按会话隔离的自动事实；手动事实可共享。
+- 群聊主动发言保留间隔、冷却、置信度、上下文条数和目标群配置；仅基于新真人消息判断，普通回复优先，过期候选和近似复读会被拦截。
 - 配置、会话、摘要和长期事实采用校验、串行原子写入与备份恢复。
 
 ### Web 管理面板
@@ -46,6 +51,10 @@
 - 支持托盘菜单、拖拽、尺寸调节、显示/隐藏、鼠标穿透和全局视线跟随。
 - 桌面感知可观察主显示器变化，在满足条件时通过动态气泡互动。
 - 隐藏桌宠时停止画面采集；是否将桌宠排除在截图外可由托盘开关控制。
+
+## 2026-09-17 后端更新
+
+重新整理 QQ 入站消息链、会话队列、主动发言与 OneBot 回执。修复重复事件、自身回声、主动检查重叠、分段跨轮串话、发送失败却写入成功历史，以及自动事实跨群注入等问题。保持现有 WebUI、桌宠、配置与历史数据；重启后端生效。实现、验证及边界见 [BOT_LOGIC.md](./BOT_LOGIC.md)。
 
 ## 系统架构
 
@@ -101,7 +110,7 @@ npm ci
 如需固定使用当前稳定版本：
 
 ```bash
-git checkout v1.2.1
+git checkout v1.2.2
 ```
 
 ### 本地环境变量
@@ -231,7 +240,7 @@ GitHub Actions 会在 Windows、macOS 和 Linux 上执行依赖安装、lint、�
 
 ## 当前版本与路线图
 
-当前源码版本为 `1.2.1`。已完成能力、稳定设计约束、验证基线、已知限制和后续优先级统一维护在 [PROJECT_TRACKER.md](./PROJECT_TRACKER.md)。
+当前源码版本为 `1.2.2`。已完成能力、稳定设计约束、验证基线、已知限制和后续优先级统一维护在 [PROJECT_TRACKER.md](./PROJECT_TRACKER.md)。
 
 ## 许可证
 

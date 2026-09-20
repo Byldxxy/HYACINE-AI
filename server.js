@@ -22,8 +22,10 @@ const { WebSocketServer, WebSocket } = require('ws');
 const { maskApiKey } = require('./lib/utils');
 const { createConfigManager } = require('./lib/config');
 const { createMemoryManager } = require('./lib/memory');
-const { observeMessage, restartProactiveTimer } = require('./lib/proactive');
+const { restartProactiveTimer, stopProactiveTimer } = require('./lib/proactive');
 const { createMessageHandler, sendToQQ } = require('./lib/message-handler');
+const { createConversationRuntime } = require('./lib/conversation-runtime');
+const qqTransport = require('./lib/qq-transport');
 const { generateImage, selectImageGenerationPrompt } = require('./lib/image-gen');
 const { createDesktopAwarenessEngine, normalizeDesktopAwarenessConfig } = require('./lib/desktop-awareness');
 const { getRuntimePaths, prepareRuntimeData } = require('./lib/paths');
@@ -201,14 +203,15 @@ function syncDesktopAwarenessConfig() {
 
 // --- 创建消息处理器 ---
 let wssRef = null; // 将在后面赋值
+const conversationRuntime = createConversationRuntime();
 const handleQQMessage = createMessageHandler({
+    runtime: conversationRuntime,
     // 注入数据和副作用，使 message-handler 不需要导入 server.js，也便于单元测试替换。
     getConfig: () => configManager.getConfig(),
     memory,
     paths: { AVATAR_DIR },
     broadcastLog: (ws, type, msg) => wssRef && broadcastLog(wssRef, type, msg),
     get wss() { return wssRef; },
-    observeMessage,
     emitPetEvent: (event, detail) => wssRef && broadcastPetEvent(wssRef, event, detail),
 });
 
@@ -355,8 +358,11 @@ app.get('/api/memory/:sessionId', (req, res) => {
 
 app.post('/api/memory/:sessionId', async (req, res) => {
     try {
-        memory.setSession(req.params.sessionId, req.body);
-        await memory.saveMemoryToDisk();
+        conversationRuntime.reset(req.params.sessionId);
+        await conversationRuntime.enqueue(req.params.sessionId, async () => {
+            memory.setSession(req.params.sessionId, req.body);
+            await memory.saveMemoryToDisk();
+        });
         if (wssRef) broadcastLog(wssRef, 'system', `✏️ 会话 [${req.params.sessionId}] 记忆已被手动修改`);
         res.json({ success: true });
     } catch (error) {
@@ -365,6 +371,7 @@ app.post('/api/memory/:sessionId', async (req, res) => {
 });
 
 app.delete('/api/memory/:sessionId', async (req, res) => {
+    conversationRuntime.reset(req.params.sessionId);
     const sessions = memory.getSessions();
     const summaries = memory.getSummaries();
     delete sessions[req.params.sessionId];
@@ -376,6 +383,7 @@ app.delete('/api/memory/:sessionId', async (req, res) => {
 });
 
 app.delete('/api/memory', async (req, res) => {
+    conversationRuntime.reset();
     memory.setSessions({});
     memory.setSummaries({});
     await memory.saveMemoryToDisk();
@@ -392,6 +400,7 @@ app.get('/api/summary/:sessionId', (req, res) => {
 
 app.post('/api/summary/:sessionId', async (req, res) => {
     try {
+        conversationRuntime.reset(req.params.sessionId);
         memory.setSummary(req.params.sessionId, req.body?.summary ?? '');
         await memory.saveSummariesToDisk();
         if (wssRef) broadcastLog(wssRef, 'system', `📝 会话 [${req.params.sessionId}] 摘要已更新`);
@@ -457,6 +466,7 @@ app.post('/api/test-chat', async (req, res) => {
             systemPrompt,
             summary: summaries[testSessionId],
             persistentMemory: persistentMem,
+            sessionId: testSessionId,
             includePersistentMemory: config.persistMem,
             sessionMessages: sessions[testSessionId],
         });
@@ -545,38 +555,42 @@ const wss = new WebSocketServer({ server });
 wssRef = wss;
 
 wss.on('connection', (ws) => {
-    ws.on('message', async (message) => {
-        const msgStr = message.toString();
-        if (msgStr === 'iam_frontend') {
-            ws.isFrontend = true;
-            return;
+    ws.on('close', () => {
+        qqTransport.disconnect(ws);
+        if (napcatConnections.includes(ws)) {
+            napcatConnections = napcatConnections.filter(c => c !== ws);
+            broadcastLog(wss, 'system', 'NapCat 已断开');
         }
-        if (msgStr === 'iam_pet') {
-            ws.isPet = true;
-            return;
-        }
-
-        if (!ws.isFrontend && !napcatConnections.includes(ws)) {
-            napcatConnections.push(ws);
-            broadcastLog(wss, 'system', '🔗 NapCat 已连接');
-            ws.on('close', () => {
-                napcatConnections = napcatConnections.filter(c => c !== ws);
-                broadcastLog(wss, 'system', '🔌 NapCat 已断开');
-            });
-        }
-
-        let msgObj;
-        try { msgObj = JSON.parse(msgStr); } catch (_e) { return; }
-
-        if (msgObj.post_type === 'message') {
-            await handleQQMessage(ws, msgObj);
-        }
+    });
+    ws.on('error', error => { broadcastLog(wss, 'error', `WebSocket 错误: ${error.message}`); });
+    ws.on('message', async message => {
+        try {
+            const raw = message.toString();
+            if (raw === 'iam_frontend' && !ws.selfId) { ws.isFrontend = true; return; }
+            if (raw === 'iam_pet' && !ws.selfId) { ws.isPet = true; return; }
+            if (ws.isFrontend || ws.isPet) return;
+            let event;
+            try { event = JSON.parse(raw); } catch { return; }
+            if (!event || typeof event !== 'object') return;
+            if (qqTransport.handleResponse(ws, event)) return;
+            if (!['message', 'message_sent', 'meta_event', 'notice', 'request'].includes(event.post_type)) return;
+            await initPromise;
+            if (ws.readyState !== WebSocket.OPEN) return;
+            const config = configManager.getConfig(), selfId = String(event.self_id || ws.selfId || config.botQQ || '');
+            if (!/^\d+$/.test(selfId) || (config.botQQ && selfId !== String(config.botQQ)) || (ws.selfId && ws.selfId !== selfId)) return;
+            ws.selfId = selfId;
+            if (!napcatConnections.includes(ws)) { napcatConnections.push(ws); broadcastLog(wss, 'system', 'NapCat 已连接'); }
+            if (event.post_type === 'message') await handleQQMessage(ws, event);
+        } catch (error) { broadcastLog(wss, 'error', `QQ 消息处理失败: ${error.message}`); }
     });
 });
 
 // --- 主动发言定时检查 (使用依赖注入) ---
 const proactiveCheckDeps = () => ({
     config: configManager.getConfig(),
+    getConfig: () => configManager.getConfig(),
+    runtime: conversationRuntime,
+    memory,
     napcatConnections,
     sessions: memory.getSessions(),
     sendToQQ,
@@ -590,9 +604,7 @@ function enhancedRestartProactiveTimer() {
     restartProactiveTimer(proactiveCheckDeps);
 }
 
-// 启动主动发言定时器 (在 wss 就绪后)
-enhancedRestartProactiveTimer();
-// 确保初始化完成后也启动一次
+// 配置与历史读取完成后才启动，防止初始化期间使用默认配置
 initPromise.then(() => enhancedRestartProactiveTimer());
 
 let shuttingDown = false;
@@ -600,6 +612,9 @@ function shutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`收到 ${signal}，正在关闭后端...`);
+    stopProactiveTimer();
+    conversationRuntime.reset();
+    for (const connection of napcatConnections) qqTransport.disconnect(connection);
     wss.close();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5000).unref();

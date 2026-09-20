@@ -9,6 +9,18 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+    showPetMenu: () => ipcRenderer.invoke('pet-menu-open'),
+    getPetViewport: () => ipcRenderer.invoke('pet-viewport-get'),
+    onPetCommand: callback => {
+        const listener = (_event, command) => callback(command);
+        ipcRenderer.on('pet-command', listener);
+        return () => ipcRenderer.removeListener('pet-command', listener);
+    },
+    onPetViewport: callback => {
+        const listener = (_event, viewport) => callback(viewport);
+        ipcRenderer.on('pet-viewport', listener);
+        return () => ipcRenderer.removeListener('pet-viewport', listener);
+    },
     // 窗口交互：渲染进程提供屏幕坐标，主进程负责真正移动原生窗口。
     setMousePassthrough: (passthrough) => {
         ipcRenderer.send('set-mouse-passthrough', passthrough);
@@ -16,14 +28,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openConfig: () => {
         ipcRenderer.send('open-config');
     },
+    onDragAnchor: (callback) => {
+        const listener = (_event, anchor) => callback(anchor);
+        ipcRenderer.on('drag-anchor', listener);
+        return () => ipcRenderer.removeListener('drag-anchor', listener);
+    },
     dragStart: (mouseX, mouseY) => {
         ipcRenderer.send('drag-start', { mouseX, mouseY });
     },
     dragMove: (mouseX, mouseY) => {
         ipcRenderer.send('drag-move', { mouseX, mouseY });
     },
-    dragEnd: () => {
-        ipcRenderer.send('drag-end');
+    dragEnd: (detail) => {
+        ipcRenderer.send('drag-end', detail);
     },
     // 订阅函数都返回 unsubscribe，供 React useEffect 在卸载时清理监听器。
     onPassthroughChanged: (callback) => {
@@ -43,4 +60,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.send('resize-pet-window', { width, height, anchorBottom });
     },
     testDesktopAwareness: () => ipcRenderer.invoke('test-desktop-awareness'),
+    getWindowCompanion: () => ipcRenderer.invoke('window-companion-get'),
+    setWindowRoaming: enabled => ipcRenderer.invoke('window-companion-enabled', enabled),
+    setPetMetrics: metrics => ipcRenderer.send('window-companion-metrics', metrics),
+    setPetBusy: busy => ipcRenderer.send('window-companion-busy', busy),
+    pauseWindowRoaming: (paused, mode) => ipcRenderer.send('window-companion-ui-paused', mode ? { paused, mode } : paused),
+    returnToDesktop: () => ipcRenderer.send('window-companion-floor'),
+    onWindowCompanion: callback => {
+        const listener = (_event, state) => callback(state);
+        ipcRenderer.on('window-companion-state', listener);
+        return () => ipcRenderer.removeListener('window-companion-state', listener);
+    },
 });

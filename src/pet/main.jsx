@@ -1,4 +1,5 @@
 // src/pet/main.jsx - 桌宠模式入口
+import './rose-glass.css';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import PetScene from './PetScene';

@@ -68,3 +68,18 @@ test('uses an injected OpenAI-compatible client for completion requests', async 
     assert.equal(received.payload.model, 'model');
     assert.equal(completion.choices[0].message.content, 'ok');
 });
+
+
+test('session memory is isolated and runtime metadata is never sent to the provider', () => {
+    const messages = buildConversationMessages({ systemPrompt: 'system', sessionId: 'group_1', groupId: '1', includePersistentMemory: true,
+        persistentMemory: [{ fact: 'shared', source: 'manual' }, { fact: 'local', source: 'group_1' }, { fact: 'private-secret', source: 'user_2' }, { fact: 'other-group', source: 'group_3' }],
+        sessionMessages: [{ role: 'user', content: 'hi', messageId: '1', time: 'now', senderId: '4' }] });
+    assert.match(JSON.stringify(messages), /local/); assert.match(JSON.stringify(messages), /shared/);
+    assert.doesNotMatch(JSON.stringify(messages), /private-secret|other-group|messageId|senderId/);
+});
+
+test('zero temperature is preserved and model requests have a bounded timeout without hidden retries', async () => {
+    let options, payload;
+    await requestChatCompletion({ apiKey: 'test', temperature: 0 }, [], o => { options = o; return { chat: { completions: { create: async p => { payload = p; return {}; } } } }; });
+    assert.equal(payload.temperature, 0); assert.equal(options.timeout, 60000); assert.equal(options.maxRetries, 0);
+});

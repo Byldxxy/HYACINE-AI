@@ -26,6 +26,11 @@ const {
 const path = require('path');
 const { getElectronDataDir } = require('../lib/paths');
 const { createDesktopObserver } = require('./desktop-observer');
+const { createWindowCompanion } = require('./window-companion');
+const { createPetMenuTemplate, visiblePetViewport } = require('./pet-menu');
+let openMenus = 0;
+let petPopup = null;
+let windowCompanion = null;
 
 // 下列变量代表进程级单例。桌宠只允许创建一个窗口、托盘和观察器。
 let mainWindow = null;
@@ -223,9 +228,10 @@ function setPetVisible(visible) {
     isPetVisible = visible;
     // 隐藏桌宠也暂停采集，避免用户认为“看不见桌宠”等于退出时仍在截图。
     desktopObserver?.setSuspended(!visible);
+    windowCompanion?.setSuspended(!visible);
     if (mainWindow) {
         if (visible) mainWindow.showInactive();
-        else mainWindow.hide();
+        else { mainWindow.webContents.send('pet-command', 'close-controls'); mainWindow.hide(); }
     }
     notifyServerPetState();
     rebuildTrayMenu();
@@ -263,21 +269,26 @@ function createPetWindow() {
     if (isDev) {
         // 开发模式：连接 Vite dev server
         mainWindow.loadURL(`${DEV_SERVER_URL.replace(/\/$/, '')}/pet.html`);
-        mainWindow.webContents.openDevTools({ mode: 'detach' });
+        if (process.env.HYACINE_OPEN_DEVTOOLS === '1') mainWindow.webContents.openDevTools({ mode: 'detach' });
     } else {
         // 生产模式也通过本地 HTTP 加载，使 /assets、模型和 Ammo 路径保持一致。
         mainWindow.loadURL(`${CONFIG_URL}/pet.html`);
     }
 
+    mainWindow.on('move', publishViewport);
+    mainWindow.on('resize', publishViewport);
+    mainWindow.webContents.on('did-start-loading', () => windowCompanion?.setUiPaused(false, 'renderer'));
     mainWindow.on('show', () => {
         isPetVisible = true;
         desktopObserver?.setSuspended(false);
+        windowCompanion?.setSuspended(false);
         notifyServerPetState();
         rebuildTrayMenu();
     });
     mainWindow.on('hide', () => {
         isPetVisible = false;
         desktopObserver?.setSuspended(true);
+        windowCompanion?.setSuspended(true);
         notifyServerPetState();
         rebuildTrayMenu();
     });
@@ -285,6 +296,7 @@ function createPetWindow() {
         mainWindow = null;
         isPetVisible = false;
         desktopObserver?.setSuspended(true);
+        windowCompanion?.setSuspended(true);
         notifyServerPetState();
     });
 }
@@ -311,60 +323,72 @@ function stopCursorTracking() {
 }
 
 // --- 系统托盘 ---
+function getPetViewport() {
+    if (!mainWindow || mainWindow.isDestroyed()) return null;
+    const bounds = mainWindow.getBounds();
+    return visiblePetViewport(bounds, screen.getDisplayMatching(bounds).workArea);
+}
+function publishViewport() { mainWindow?.webContents.send('pet-viewport', getPetViewport()); }
+function setPassthrough(value) {
+    isPassthrough = Boolean(value);
+    mainWindow?.setIgnoreMouseEvents(isPassthrough, isPassthrough ? { forward: true } : undefined);
+    mainWindow?.webContents.send('passthrough-changed', isPassthrough);
+    if (isPassthrough) mainWindow?.webContents.send('pet-command', 'close-controls');
+    rebuildTrayMenu();
+}
+async function testDesktopAwareness() {
+    if (!desktopObserver) return { ok: false, message: '桌面感知尚未初始化' };
+    mainWindow?.blur();
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return desktopObserver.requestTest();
+}
+function executePetCommand(id, checked) {
+    switch (id) {
+        case 'config': shell.openExternal(CONFIG_URL); break;
+        case 'visible': setPetVisible(checked); break;
+        case 'passthrough': setPassthrough(checked); break;
+        case 'topmost': mainWindow?.setAlwaysOnTop(Boolean(checked)); rebuildTrayMenu(); break;
+        case 'roaming': windowCompanion?.setEnabled(checked); break;
+        case 'floor': windowCompanion?.returnToFloor(); break;
+        case 'greet': mainWindow?.webContents.send('pet-command', 'greet'); break;
+        case 'size':
+            setPassthrough(false); setPetVisible(true);
+            mainWindow?.focus();
+            mainWindow?.webContents.send('pet-command', 'size');
+            break;
+        case 'awareness': setDesktopAwarenessEnabled(checked); break;
+        case 'capture': setHidePetFromCapture(checked); break;
+        case 'observe': mainWindow?.webContents.send('pet-command', 'observe'); break;
+        case 'quit': app.quit(); break;
+    }
+}
+function buildPetMenu() {
+    const menu = Menu.buildFromTemplate(createPetMenuTemplate({
+        visible: isPetVisible, passthrough: isPassthrough,
+        topmost: Boolean(mainWindow?.isAlwaysOnTop()),
+        roaming: Boolean(windowCompanion?.getEnabled()),
+        awareness: Boolean(desktopObserver?.getState().enabled),
+        hideFromCapture: hidePetFromCapture, serverReady,
+    }, executePetCommand));
+    let opened = false;
+    menu.on('menu-will-show', () => {
+        if (opened) return;
+        opened = true; openMenus++;
+        windowCompanion?.setUiPaused(true, 'native-menu');
+    });
+    menu.on('menu-will-close', () => {
+        if (!opened) return;
+        opened = false; openMenus = Math.max(0, openMenus - 1);
+        if (!openMenus) windowCompanion?.setUiPaused(false, 'native-menu');
+        // Rebuild only after the selected checkbox command has finished.
+        setImmediate(rebuildTrayMenu);
+    });
+    return menu;
+}
 function rebuildTrayMenu() {
-    if (!tray) return;
-    const contextMenu = Menu.buildFromTemplate([
-        {
-            label: '打开配置面板',
-            click: () => shell.openExternal(CONFIG_URL)
-        },
-        { type: 'separator' },
-        {
-            label: '显示桌宠',
-            type: 'checkbox',
-            checked: isPetVisible,
-            click: (item) => setPetVisible(item.checked)
-        },
-        {
-            label: '穿透模式',
-            type: 'checkbox',
-            checked: isPassthrough,
-            click: (item) => {
-                if (!mainWindow) return;
-                isPassthrough = item.checked;
-                mainWindow.setIgnoreMouseEvents(isPassthrough, isPassthrough ? { forward: true } : undefined);
-                mainWindow.webContents.send('passthrough-changed', isPassthrough);
-            }
-        },
-        {
-            label: '置顶切换',
-            type: 'checkbox',
-            checked: true,
-            click: (item) => {
-                if (mainWindow) mainWindow.setAlwaysOnTop(item.checked);
-            }
-        },
-        {
-            label: '桌面感知',
-            type: 'checkbox',
-            enabled: serverReady,
-            checked: Boolean(desktopObserver?.getState().enabled),
-            click: (item) => setDesktopAwarenessEnabled(item.checked)
-        },
-        {
-            label: '截图隐藏',
-            type: 'checkbox',
-            enabled: serverReady,
-            checked: hidePetFromCapture,
-            click: (item) => setHidePetFromCapture(item.checked)
-        },
-        { type: 'separator' },
-        {
-            label: '退出',
-            click: () => app.quit()
-        }
-    ]);
-    tray.setContextMenu(contextMenu);
+    if (openMenus) return;
+    if (tray) tray.setContextMenu(buildPetMenu());
+    if (process.platform === 'darwin') app.dock?.setMenu(buildPetMenu());
 }
 
 function createTray() {
@@ -387,45 +411,73 @@ function createTray() {
 }
 
 // --- IPC: 渲染进程 → 主进程 ---
-ipcMain.on('set-mouse-passthrough', (_event, passthrough) => {
-    if (mainWindow) {
-        if (passthrough) {
-            mainWindow.setIgnoreMouseEvents(true, { forward: true });
-        } else {
-            mainWindow.setIgnoreMouseEvents(false);
-        }
-    }
+ipcMain.on('set-mouse-passthrough', (event, value) => {
+    if (event.sender === mainWindow?.webContents && typeof value === 'boolean') setPassthrough(value);
 });
+ipcMain.handle('pet-menu-open', event => {
+    if (event.sender !== mainWindow?.webContents || petPopup) return;
+    petPopup = buildPetMenu();
+    petPopup.popup({ window: mainWindow, callback: () => { petPopup = null; } });
+});
+ipcMain.handle('pet-viewport-get', event => event.sender === mainWindow?.webContents ? getPetViewport() : null);
 
 ipcMain.on('open-config', () => {
     shell.openExternal(CONFIG_URL);
 });
 
-// 拖拽窗口
-ipcMain.on('drag-start', (event, { mouseX, mouseY }) => {
-    if (!mainWindow) return;
-    const [winX, winY] = mainWindow.getPosition();
-    mainWindow._dragOffset = { x: mouseX - winX, y: mouseY - winY };
+// Drag a raised hand. Expand the transparent canvas to leave room for swinging.
+ipcMain.on('drag-start', (event, value = {}) => {
+    const { mouseX, mouseY } = value;
+    if (!mainWindow || event.sender !== mainWindow.webContents || !Number.isFinite(mouseX) || !Number.isFinite(mouseY) || mainWindow._dragOffset) return;
+    windowCompanion?.beginDrag();
+    const original = mainWindow.getBounds();
+    const width = Math.min(2400, Math.round(original.height * 1.7));
+    const height = Math.min(2000, Math.round(original.height * 1.4));
+    const anchor = { x: width / 2, y: height * 0.24, baseHeight: original.height };
+    mainWindow._dragOffset = { ...anchor, original, last: { x: mouseX, y: mouseY, time: Date.now() }, velocity: { x: 0, y: 0 } };
+    mainWindow.setBounds({ x: Math.round(mouseX - anchor.x), y: Math.round(mouseY - anchor.y), width, height });
+    mainWindow.webContents.send('drag-anchor', anchor);
 });
 
-ipcMain.on('drag-move', (event, { mouseX, mouseY }) => {
-    if (!mainWindow || !mainWindow._dragOffset) return;
-    const { x: offX, y: offY } = mainWindow._dragOffset;
-    mainWindow.setPosition(
-        Math.round(mouseX - offX),
-        Math.round(mouseY - offY)
-    );
+ipcMain.on('drag-move', (event, value = {}) => {
+    const { mouseX, mouseY } = value;
+    if (!mainWindow || event.sender !== mainWindow.webContents || !mainWindow._dragOffset || !Number.isFinite(mouseX) || !Number.isFinite(mouseY)) return;
+    const drag = mainWindow._dragOffset, time = Date.now(), dt = (time - drag.last.time) / 1000;
+    if (dt > 0.004) {
+        const limit = v => Math.max(-1400, Math.min(1400, v));
+        drag.velocity = dt < 0.2 ? { x: limit((mouseX - drag.last.x) / dt), y: limit((mouseY - drag.last.y) / dt) } : { x: 0, y: 0 };
+        drag.last = { x: mouseX, y: mouseY, time };
+    }
+    mainWindow.setPosition(Math.round(mouseX - drag.x), Math.round(mouseY - drag.y));
 });
 
-ipcMain.on('drag-end', () => {
-    if (mainWindow) mainWindow._dragOffset = null;
+ipcMain.on('drag-end', (event, detail = {}) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || !mainWindow._dragOffset) return;
+    const drag = mainWindow._dragOffset, bounds = mainWindow.getBounds();
+    const foot = detail?.foot;
+    const valid = foot && Number.isFinite(foot.x) && Number.isFinite(foot.y) && Math.abs(foot.x) < bounds.width * 2 && Math.abs(foot.y) < bounds.height * 2;
+    const point = valid ? { x: bounds.x + foot.x, y: bounds.y + foot.y } : { x: bounds.x + drag.x, y: bounds.y + drag.y + drag.original.height * 0.7 };
+    mainWindow._dragOffset = null;
+    windowCompanion?.prepareResize();
+    mainWindow.setSize(drag.original.width, drag.original.height);
+    mainWindow.webContents.send('drag-anchor', null);
+    const velocity = detail?.cancelled || Date.now() - drag.last.time > 120 ? { x: 0, y: 0 } : drag.velocity;
+    windowCompanion?.endDrag(velocity, point);
 });
 
 // 窗口缩放
-ipcMain.on('resize-pet-window', (_event, { width, height, anchorBottom }) => {
-    if (mainWindow) {
+ipcMain.on('resize-pet-window', (event, { width, height, anchorBottom }) => {
+    if (mainWindow && event.sender === mainWindow.webContents && Number.isFinite(width) && Number.isFinite(height) && width >= 100 && width <= 1000 && height >= 150 && height <= 2000) {
+        if (mainWindow._dragOffset) {
+            mainWindow._dragOffset.original.width = Math.round(width);
+            mainWindow._dragOffset.original.height = Math.round(height);
+            return;
+        }
         const nextWidth = Math.round(width);
         const nextHeight = Math.round(height);
+        const current = mainWindow.getBounds();
+        if (current.width === nextWidth && current.height === nextHeight) return;
+        windowCompanion?.prepareResize();
         if (anchorBottom) {
             // 气泡增加窗口高度时固定窗口底边，否则角色会随着窗口变高向下跳动。
             const [x, y] = mainWindow.getPosition();
@@ -442,21 +494,32 @@ ipcMain.on('resize-pet-window', (_event, { width, height, anchorBottom }) => {
     }
 });
 
-ipcMain.handle('test-desktop-awareness', async () => {
-    if (!desktopObserver) return { ok: false, message: '桌面感知尚未初始化' };
-    // 点击菜单会让桌宠成为前台应用；先失焦并稍等，避免观察器截到自己的菜单。
-    mainWindow?.blur();
-    await new Promise(resolve => setTimeout(resolve, 250));
-    return desktopObserver.requestTest();
+ipcMain.handle('test-desktop-awareness', event => event.sender === mainWindow?.webContents ? testDesktopAwareness() : { ok: false });
+ipcMain.on('toggle-passthrough', event => {
+    if (event.sender === mainWindow?.webContents) setPassthrough(!isPassthrough);
 });
 
-// 穿透模式切换
-ipcMain.on('toggle-passthrough', () => {
-    if (!mainWindow) return;
-    isPassthrough = !isPassthrough;
-    mainWindow.setIgnoreMouseEvents(isPassthrough, isPassthrough ? { forward: true } : undefined);
-    mainWindow.webContents.send('passthrough-changed', isPassthrough);
-    rebuildTrayMenu();
+// Narrow IPC surface: foreign-window geometry never leaves the main process.
+ipcMain.handle('window-companion-get', event => event.sender === mainWindow?.webContents ? windowCompanion?.getState() : null);
+ipcMain.handle('window-companion-enabled', (event, enabled) => {
+    if (event.sender !== mainWindow?.webContents || typeof enabled !== 'boolean') return false;
+    return windowCompanion?.setEnabled(enabled);
+});
+ipcMain.on('window-companion-metrics', (event, value) => {
+    if (event.sender === mainWindow?.webContents) windowCompanion?.updateMetrics(value);
+});
+ipcMain.on('window-companion-busy', (event, value) => {
+    if (event.sender === mainWindow?.webContents && typeof value === 'boolean') windowCompanion?.setBusy(value);
+});
+ipcMain.on('window-companion-ui-paused', (event, value) => {
+    if (event.sender !== mainWindow?.webContents) return;
+    if (typeof value === 'boolean') windowCompanion?.setUiPaused(value, 'renderer');
+    else if (value && typeof value.paused === 'boolean' && ['pointer', 'controls'].includes(value.mode)) {
+        windowCompanion?.setUiPaused(value.paused, 'renderer', value.mode);
+    }
+});
+ipcMain.on('window-companion-floor', event => {
+    if (event.sender === mainWindow?.webContents) windowCompanion?.returnToFloor();
 });
 
 // --- App 生命周期 ---
@@ -467,7 +530,9 @@ app.whenReady().then(async () => {
     createObserver();
     try {
         await startServer();
+        windowCompanion = createWindowCompanion({ getWindow: () => mainWindow, screen, onEnabledChange: rebuildTrayMenu });
         createPetWindow();
+        windowCompanion.start();
         createTray();
         startCursorTracking();
     } catch (error) {
@@ -478,6 +543,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
     stopCursorTracking();
+    windowCompanion?.stop();
     desktopObserver?.stop();
     if (serverProcess) serverProcess.kill();
     app.quit();
@@ -487,6 +553,7 @@ app.on('before-quit', () => {
     isQuitting = true;
     clearTimeout(serverRestartTimer);
     stopCursorTracking();
+    windowCompanion?.stop();
     desktopObserver?.stop();
     if (serverProcess) serverProcess.kill();
 });

@@ -5,6 +5,7 @@ const THREE = require('three');
 let vite;
 let MotionController;
 let removeSolverOwnedTracks;
+let loadManifestMotions;
 
 before(async () => {
     const { createServer } = await import('vite');
@@ -14,7 +15,7 @@ before(async () => {
         logLevel: 'silent',
     });
     ({ MotionController } = await vite.ssrLoadModule('/src/pet/runtime/MotionController.js'));
-    ({ removeSolverOwnedTracks } = await vite.ssrLoadModule('/src/pet/runtime/loadMotions.js'));
+    ({ removeSolverOwnedTracks, loadManifestMotions } = await vite.ssrLoadModule('/src/pet/runtime/loadMotions.js'));
 });
 
 after(async () => {
@@ -111,4 +112,30 @@ test('direct interaction survives desktop events and finalizes before the next M
     controller.beforeAnimationUpdate();
     assert.equal(actions.get(clips.dance).stops, 1);
     assert.equal(actions.get(clips.idle).effectiveWeight, 1);
+});
+
+
+test('in-place external walking removes world travel and preserves the missing base-pose channels', async () => {
+    const center = new THREE.Bone(); center.name = 'センター'; center.position.set(0, 10, 0);
+    const foot = new THREE.Bone(); foot.name = '左足ＩＫ'; foot.position.set(1, 1, 0);
+    const clip = new THREE.AnimationClip('source', 2, [
+        new THREE.VectorKeyframeTrack('.bones[全ての親].position', [0, 2], [0, 0, 0, 0, 0, -100]),
+        new THREE.VectorKeyframeTrack('.bones[センター].position', [0, 2], [0, 10, -5, 0, 10, -5]),
+        new THREE.VectorKeyframeTrack('.bones[左足ＩＫ].position', [0, 2], [1, 1, -7, 1, 1, -3]),
+    ]);
+    const base = new THREE.AnimationClip('base', 1, [
+        new THREE.QuaternionKeyframeTrack('.bones[head].quaternion', [0, 1], [0,0,0,1, 0,0,0,1]),
+    ]);
+    const mesh = { skeleton: { bones: [center, foot] } };
+    const loader = { loadAnimation: (_file, _mesh, done) => done(clip) };
+    const { motions } = await loadManifestMotions(loader, mesh, { walking: { file: 'walk.vmd', inPlace: true, strideScale: 0.5 } }, { walking: { clip: base } });
+    assert.equal(motions.walking.clip.tracks.some(t => t.name.includes('全ての親')), false);
+    assert.deepEqual(Array.from(motions.walking.clip.tracks.find(t => t.name.includes('左足')).values), [1,1,-1,1,1,1]);
+    assert.ok(motions.walking.clip.tracks.some(t => t.name.includes('head')));
+});
+
+test('missing optional VMD is reported without discarding a successfully loaded motion', async () => {
+    const loader = { loadAnimation: (file, _mesh, done, _progress, fail) => file === 'missing.vmd' ? fail(new Error('missing')) : done(new THREE.AnimationClip('ok', 1, [])) };
+    const { motions, errors } = await loadManifestMotions(loader, {}, { idle: { file: 'ok.vmd' }, greet: { file: 'missing.vmd' } });
+    assert.ok(motions.idle); assert.equal(errors[0].name, 'greet'); assert.equal(errors.length, 1);
 });
