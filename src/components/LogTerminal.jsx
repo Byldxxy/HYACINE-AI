@@ -1,77 +1,100 @@
-/**
- * 可拖动的 WebUI 实时日志浮层。
- *
- * logs 来源于 useWebSocket，只存在浏览器内存。组件会识别普通图片 URL 和 CQ:image URL
- * 生成预览，但不会主动下载或持久化 base64 图片内容。
- */
-import React, { useEffect, useRef } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
-import { Terminal, X } from 'lucide-react';
+/** Local live-log drawer. Message content stays plain text; remote images are never fetched. */
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { ArrowDown, Check, Copy, Pause, Play, Search, Terminal, X } from 'lucide-react';
+import { IconButton } from './UIComponents';
+import PinkSelect from './PinkSelect';
+import '../styles/conversation.css';
 
-export default function LogTerminal({ logs, isLogOpen, setIsLogOpen, containerRef }) {
-    const logsEndRef = useRef(null);
+const LEVELS = [
+    { value: 'all', label: '全部级别' }, { value: 'in', label: '接收' }, { value: 'out', label: '发送' },
+    { value: 'info', label: '信息' }, { value: 'system', label: '系统' }, { value: 'warn', label: '警告' }, { value: 'error', label: '错误' },
+];
+const LEVEL_LABELS = Object.fromEntries(LEVELS.map(option => [option.value, option.label]));
+const formatLog = log => `[${log.time || '—'}] [${log.level || 'info'}] ${String(log.content || '')}`;
 
+export default function LogTerminal({ logs = [], isLogOpen, setIsLogOpen, containerRef: _containerRef }) {
+    const titleId = useId(), panelRef = useRef(null), searchRef = useRef(null), scrollRef = useRef(null), copyTimer = useRef(null);
+    const reducedMotion = useReducedMotion();
+    const [search, setSearch] = useState(''), [level, setLevel] = useState('all');
+    const [following, setFollowing] = useState(true), [lastSeen, setLastSeen] = useState(null);
+    const [copyState, setCopyState] = useState(null);
+    const visibleLogs = useMemo(() => {
+        const query = search.trim().toLocaleLowerCase();
+        return logs.filter(log => (level === 'all' || log.level === level) && (!query || `${log.time || ''} ${String(log.content || '')}`.toLocaleLowerCase().includes(query)));
+    }, [logs, search, level]);
+    const seenIndex = lastSeen ? logs.indexOf(lastSeen) : -1;
+    const unread = following ? 0 : seenIndex >= 0 ? logs.length - seenIndex - 1 : logs.length;
+
+    useEffect(() => () => clearTimeout(copyTimer.current), []);
     useEffect(() => {
-        logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [logs]);
+        if (!isLogOpen) return;
+        const previousFocus = document.activeElement;
+        searchRef.current?.focus({ preventScroll: true });
+        const onKeyDown = event => {
+            if (event.defaultPrevented) return;
+            if (event.key === 'Escape') { event.preventDefault(); setIsLogOpen(false); return; }
+            if (event.key !== 'Tab') return;
+            const focusable = [...(panelRef.current?.querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]') || [])].filter(element => element.getClientRects().length);
+            const first = focusable[0], last = focusable.at(-1);
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        };
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('keydown', onKeyDown);
+            if (previousFocus?.isConnected && typeof previousFocus.focus === 'function') previousFocus.focus({ preventScroll: true });
+        };
+    }, [isLogOpen, setIsLogOpen]);
+    useEffect(() => {
+        const panel = scrollRef.current;
+        if (isLogOpen && following && panel) panel.scrollTop = panel.scrollHeight;
+    }, [visibleLogs, following, isLogOpen]);
 
-    return (
-        <motion.div drag dragConstraints={containerRef} dragMomentum={false} className="fixed bottom-5 right-5 z-50">
-            <AnimatePresence>
-                {isLogOpen && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 8 }}
-                        className="absolute bottom-12 right-0 flex max-h-[520px] w-[min(420px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-gray-700 bg-[#171b1e] shadow-2xl"
-                    >
-                        <div className="flex h-11 items-center justify-between border-b border-white/10 px-3.5">
-                            <div className="flex items-center gap-2 text-xs font-medium text-gray-200">
-                                <Terminal className="h-4 w-4 text-emerald-400" />实时日志
-                                <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-gray-400">{logs.length}</span>
-                            </div>
-                            <button type="button" onClick={() => setIsLogOpen(false)} className="flex h-7 w-7 items-center justify-center rounded text-gray-400 hover:bg-white/10 hover:text-white" aria-label="关闭日志">
-                                <X className="h-4 w-4" />
-                            </button>
-                        </div>
-                        <div className="custom-scrollbar flex-1 space-y-2 overflow-y-auto p-3 font-mono text-xs">
-                            {logs.length === 0 && <div className="py-10 text-center text-gray-500">暂无日志</div>}
-                            {logs.map((log, index) => {
-                                const imageUrl = log.content.match(/https?:\/\/[^\s)\]"]+\.(?:png|jpg|jpeg|webp|gif)/i)?.[0];
-                                const cqImage = log.content.match(/\[CQ:image,file=([^\]]+)\]/)?.[1];
-                                const cqImageUrl = cqImage?.startsWith('http') ? cqImage : null;
-                                const levelClass = log.level === 'in'
-                                    ? 'text-sky-300'
-                                    : log.level === 'out'
-                                        ? 'text-emerald-300'
-                                        : log.level === 'error'
-                                            ? 'text-red-300'
-                                            : 'text-gray-300';
+    const resume = () => { setFollowing(true); setLastSeen(logs.at(-1) || null); };
+    const copyLogs = async () => {
+        clearTimeout(copyTimer.current);
+        try {
+            await navigator.clipboard.writeText(visibleLogs.map(formatLog).join('\n'));
+            setCopyState('已复制');
+        } catch {
+            setCopyState('复制失败');
+        }
+        copyTimer.current = setTimeout(() => setCopyState(null), 2200);
+    };
 
-                                return (
-                                    <div key={`${log.time}-${index}`} className="border-b border-white/5 pb-2 last:border-0">
-                                        <div className="mb-1 text-[10px] text-gray-600">{log.time}</div>
-                                        <div className={`break-all leading-5 ${levelClass}`}>{log.content}</div>
-                                        {imageUrl && <img src={imageUrl} alt="日志图片" className="mt-2 max-h-28 rounded border border-white/10" />}
-                                        {cqImageUrl && <img src={cqImageUrl} alt="CQ 图片" className="mt-2 max-h-28 rounded border border-white/10" />}
-                                        {cqImage && !cqImageUrl && <div className="mt-1 text-[10px] text-amber-300">图片数据：base64</div>}
-                                    </div>
-                                );
-                            })}
-                            <div ref={logsEndRef} />
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-            <button
-                type="button"
-                onClick={() => setIsLogOpen(!isLogOpen)}
-                className={`flex h-10 w-10 items-center justify-center rounded-md border shadow-lg transition-colors ${isLogOpen ? 'border-gray-700 bg-[#171b1e] text-emerald-400' : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'}`}
-                aria-label={isLogOpen ? '关闭日志' : '打开日志'}
-                title={isLogOpen ? '关闭日志' : '打开日志'}
-            >
-                {isLogOpen ? <X className="h-4 w-4" /> : <Terminal className="h-4 w-4" />}
-            </button>
-        </motion.div>
-    );
+    if (typeof document === 'undefined') return null;
+    return createPortal(<AnimatePresence>{isLogOpen && <motion.div className="log-drawer-layer" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: reducedMotion ? 0 : 0.18 }}>
+        <button type="button" className="log-drawer-backdrop" tabIndex={-1} aria-label="关闭日志" onClick={() => setIsLogOpen(false)} />
+        <motion.section ref={panelRef} className="log-drawer" role="dialog" aria-modal="true" aria-labelledby={titleId} initial={reducedMotion ? false : { x: 24 }} animate={{ x: 0 }} exit={reducedMotion ? undefined : { x: 24 }} transition={{ duration: reducedMotion ? 0 : 0.18 }}>
+            <header className="log-drawer-header">
+                <div className="log-drawer-title"><Terminal aria-hidden="true" /><h2 id={titleId}>实时日志</h2><span>{logs.length}</span></div>
+                <div className="log-drawer-actions">
+                    <IconButton icon={copyState === '已复制' ? Check : Copy} label={copyState || '复制当前日志'} disabled={visibleLogs.length === 0} onClick={copyLogs} />
+                    <IconButton icon={X} label="关闭日志" onClick={() => setIsLogOpen(false)} />
+                </div>
+            </header>
+            <div className="log-drawer-filters">
+                <label className="log-drawer-search"><Search aria-hidden="true" /><input ref={searchRef} value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索日志" aria-label="搜索日志" /></label>
+                <PinkSelect label="日志级别" value={level} options={LEVELS} onChange={setLevel} />
+            </div>
+            <div className="log-drawer-meta"><span>{visibleLogs.length} 条{search || level !== 'all' ? '匹配' : '记录'}</span><button type="button" aria-pressed={!following} onClick={() => {
+                if (following) { setFollowing(false); setLastSeen(logs.at(-1) || null); }
+                else resume();
+            }}>{following ? <Pause size={12} /> : <Play size={12} />}{following ? '暂停跟随' : '继续跟随'}</button></div>
+            <div ref={scrollRef} className="log-drawer-stream custom-scrollbar" aria-label="日志内容" onScroll={event => {
+                const panel = event.currentTarget;
+                if (following && panel.scrollHeight - panel.scrollTop - panel.clientHeight > 56) {
+                    setFollowing(false); setLastSeen(logs.at(-1) || null);
+                }
+            }}>
+                {visibleLogs.length === 0 ? <div className="log-drawer-empty"><Terminal aria-hidden="true" /><span>{logs.length ? '没有匹配的日志' : '等待新日志'}</span></div> : visibleLogs.map((log, index) => <article key={log.id || `${log.time}-${index}`} className={`log-entry log-entry-${LEVEL_LABELS[log.level] ? log.level : 'info'}`}>
+                    <div className="log-entry-meta"><span className="log-entry-level">{LEVEL_LABELS[log.level] || log.level || '信息'}</span><time>{log.time || '—'}</time></div>
+                    <p>{String(log.content || '')}</p>
+                </article>)}
+            </div>
+            <footer className="log-drawer-footer"><span role="status">{copyState || (following ? '自动跟随最新记录' : '已暂停自动跟随')}</span>{!following && <button type="button" onClick={resume}><ArrowDown size={13} />{unread > 0 ? `${unread} 条新日志` : '回到最新'}</button>}</footer>
+        </motion.section>
+    </motion.div>}</AnimatePresence>, document.body);
 }

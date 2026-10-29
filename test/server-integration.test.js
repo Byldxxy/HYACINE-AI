@@ -77,8 +77,26 @@ test('starts an isolated backend and validates management API boundaries', async
     await waitForReady(child);
     const baseUrl = `http://127.0.0.1:${port}`;
 
+    const imageData = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+    const uploaded = await fetch(`${baseUrl}/api/stickers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ meaning: '开心', data: imageData }) }).then(r => r.json());
+    assert.equal(uploaded.success, true);
+    const mediaId = uploaded.item.id;
+    assert.equal((await fetch(`${baseUrl}/api/stickers/${mediaId}/image`)).headers.get('content-type'), 'image/png');
+    assert.equal((await fetch(`${baseUrl}/api/stickers/${mediaId}`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({meaning:'笑死',scope:'group_1'}) })).status,200);
+    assert.equal((await fetch(`${baseUrl}/api/stickers`).then(r=>r.json()))[0].meaning,'笑死');
+    await fetch(`${baseUrl}/api/stickers/${mediaId}`, { method:'DELETE' });
+    assert.equal((await fetch(`${baseUrl}/api/stickers`).then(r=>r.json())).length,0);
+
     const desktop = await fetch(`${baseUrl}/api/desktop-pet`).then(response => response.json());
     assert.deepEqual(desktop, { available: false, visible: false });
+    const initialStatus = await fetch(`${baseUrl}/api/status`).then(response => response.json());
+    assert.deepEqual(initialStatus, {
+        ready: true,
+        qq: { provider: 'napcat', connected: false, connections: 0, state: 'disconnected' },
+        model: { configured: false },
+        desktop: { available: false, visible: false },
+        version: require('../package.json').version,
+    });
 
     const invalidConfig = await fetch(`${baseUrl}/api/config`, {
         method: 'POST',
@@ -100,6 +118,9 @@ test('starts an isolated backend and validates management API boundaries', async
         }),
     });
     assert.equal(validConfig.status, 200);
+    const configuredStatus = await fetch(`${baseUrl}/api/status`).then(response => response.json());
+    // Exact shape also guards against accidentally exposing a key, provider URL, model name, or QQ ID.
+    assert.deepEqual(configuredStatus, { ...initialStatus, model: { configured: true } });
 
     const invalidMemory = await fetch(`${baseUrl}/api/memory/test`, {
         method: 'POST',
@@ -144,6 +165,9 @@ test('real reverse WebSocket routes receipts, deduplicates reconnects and ignore
     ui.send(JSON.stringify(incoming(1))); first.send(JSON.stringify(incoming(1))); second.send(JSON.stringify(incoming(1)));
     await until(() => packets.length === 1);
     assert.equal(requests, 1);
+    const connectedStatus = await fetch(`${url}/api/status`).then(response => response.json());
+    assert.deepEqual(connectedStatus.qq, { provider: 'napcat', connected: true, connections: 2, state: 'connected' });
+    assert.equal(requests, 1); // Reading status must not make a model request.
     assert.deepEqual(await fetch(`${url}/api/memory/group_100`).then(r => r.json()), []);
     const { ws, p } = packets[0]; assert.equal(p.params.message.at(-1).type, 'text');
     ws.send(JSON.stringify({ echo: p.echo, status: 'ok', retcode: 0, data: { message_id: 77 } }));
@@ -155,4 +179,55 @@ test('real reverse WebSocket routes receipts, deduplicates reconnects and ignore
     const last = packets[1]; last.ws.send(JSON.stringify({ echo: last.p.echo, status: 'failed', retcode: 100, data: null }));
     await until(() => uiLogs.some(line => line.includes('回复中止'))); // Wait for the failed receipt to be handled.
     assert.equal((await fetch(`${url}/api/memory/group_100`).then(r => r.json())).length, 2);
+});
+
+test('channel switching authenticates official callbacks and connects SnowLuma without exposing secrets', async t => {
+    const { WebSocketServer } = require('ws');
+    const crypto = require('node:crypto');
+    const { signingKey } = require('../lib/qq-official');
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hyacine-channels-'));
+    const port = await getAvailablePort();
+    const snow = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+    await once(snow, 'listening');
+    let authorization = '', snowSocket;
+    snow.on('connection', (ws, req) => {
+        snowSocket = ws; authorization = req.headers.authorization;
+        ws.on('message', raw => { const packet = JSON.parse(raw); if (packet.action === 'get_login_info') ws.send(JSON.stringify({ echo: packet.echo, status: 'ok', retcode: 0, data: { user_id: 999 } })); });
+    });
+    const child = spawn(process.execPath, ['server.js'], { cwd: projectRoot, env: { ...process.env, API_KEY: '', API_PORT: String(port), BIND_HOST: '127.0.0.1', HYACINE_DATA_DIR: directory, HYACINE_RUNTIME_ROOT: projectRoot, ELECTRON_DESKTOP_PET: '0', NODE_ENV: 'test' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    t.after(async () => {
+        for (const ws of snow.clients) ws.terminate();
+        await new Promise(resolve => snow.close(resolve));
+        if (child.exitCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); }
+        await fs.rm(directory, { recursive: true, force: true });
+    });
+    await waitForReady(child);
+    const base = `http://127.0.0.1:${port}`;
+    const save = async config => { const r = await fetch(`${base}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) }); assert.equal(r.status, 200); };
+    const status = () => fetch(`${base}/api/status`).then(r => r.json());
+    const config = { qqProvider: 'qqbot', qqBotAppId: '123', qqBotSecret: 'test-secret', enableProactive: false };
+    await save(config);
+    const masked = await fetch(`${base}/api/config`).then(r => r.json());
+    assert.equal(masked.qqBotSecret, '***');
+    await save(masked);
+    const callback = (body, headers = {}) => fetch(`${base}/api/qqbot/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Bot-Appid': '123', ...headers }, body });
+    const validation = await callback(JSON.stringify({ op: 13, d: { plain_token: 'test', event_ts: String(Math.floor(Date.now() / 1000)) } }));
+    assert.equal(validation.status, 200); assert.equal((await validation.json()).signature.length, 128);
+    assert.equal((await status()).qq.state, 'awaiting-callback');
+    const body = JSON.stringify({ op: 0, t: 'GROUP_AT_MESSAGE_CREATE', d: { id: 'm1', group_openid: 'groupA', author: { member_openid: 'memberA' }, content: 'hi' } });
+    assert.equal((await callback(body)).status, 401);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = crypto.sign(null, Buffer.from(timestamp + body), signingKey(config.qqBotSecret)).toString('hex');
+    assert.equal((await callback(body, { 'X-Signature-Timestamp': timestamp, 'X-Signature-Ed25519': signature })).status, 200);
+    assert.equal((await status()).qq.state, 'callback-verified');
+    await save({ qqProvider: 'snowluma', snowlumaUrl: `ws://127.0.0.1:${snow.address().port}/`, snowlumaToken: 'snow-secret', botQQ: '999', enableProactive: false });
+    let active;
+    for (let i = 0; i < 50; i++) { active = await status(); if (active.qq.connected) break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    assert.equal(authorization, 'Bearer snow-secret'); assert.equal(active.qq.provider, 'snowluma'); assert.equal(active.qq.connected, true);
+    snowSocket.send(JSON.stringify({ post_type: 'notice', self_id: 999, notice_type: 'bot_status', sub_type: 'offline' }));
+    for (let i = 0; i < 50; i++) { active = await status(); if (!active.qq.connected) break; await new Promise(resolve => setTimeout(resolve, 20)); }
+    assert.equal(active.qq.state, 'account-offline');
+    await save({ qqProvider: 'napcat', enableProactive: false });
+    assert.equal((await callback(body)).status, 503);
+    assert.equal((await status()).qq.provider, 'napcat');
 });

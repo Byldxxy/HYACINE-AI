@@ -132,3 +132,98 @@ test('successful inbound message IDs survive restart deduplication through retai
     const f = fixture(); f.sessions.group_10 = [{ role: 'user', content: 'old', messageId: '1' }, { role: 'assistant', content: 'done' }];
     await createMessageHandler(f.deps)(f.ws, event(1)); assert.equal(f.calls.length, 0);
 });
+
+test('implicit continuation uses one decision call and abstention does not erase the shared topic', async () => {
+    const f = fixture(); let count = 0;
+    f.deps.requestChatCompletion = async (_c, messages) => { f.calls.push(messages); return completion(++count === 1 ? '刚才的话题' : count === 2 ? '{"respond":true,"reply":"接着解释"}' : '{"respond":false,"reply":""}'); };
+    const handle = createMessageHandler(f.deps);
+    await handle(f.ws, event(1, '讲讲缓存')); await handle(f.ws, event(2, '那过期后呢', false));
+    assert.deepEqual(f.sends, ['刚才的话题', '接着解释']); assert.equal(f.sessions.group_10.length, 4);
+    await handle(f.ws, event(3, '好的', false)); assert.equal(f.sessions.group_10.length, 4);
+    await handle(f.ws, event(4, '换个话题', false)); assert.equal(count, 4);
+});
+test('incoming messages invalidate pending replies and the next participant receives the complete topic context', async () => {
+    const f = fixture(), gate = deferred(); let calls = 0, latest;
+    f.deps.requestChatCompletion = async (_c, messages) => { calls++; latest = messages; return calls === 1 ? completion('原话题回复') : calls === 2 ? gate.promise : completion('{"respond":true,"reply":"接住另一位群友的梗"}'); };
+    const handle = createMessageHandler(f.deps); await handle(f.ws, event(1));
+    const pending = handle(f.ws, event(2, '中间的补充', false)); await tick();
+    const next = handle(f.ws, event(3, '另一个人接梗', false, { user_id: 30 }));
+    gate.resolve(completion('{"respond":true,"reply":"过期回复"}')); await Promise.all([pending, next]);
+    assert.deepEqual(f.sends, ['原话题回复', '接住另一位群友的梗']);
+    assert.match(JSON.stringify(latest), /中间的补充/); assert.match(JSON.stringify(latest), /另一个人接梗/);
+    assert.equal(f.sessions.group_10.at(-2).senderId, '30');
+});
+test('a confirmed proactive message opens topic continuation and a directed message stays in observation', async () => {
+    const f = fixture({ proactiveCooldown: 0 }); observations(f);
+    f.deps.requestChatCompletion = async () => completion('{"score":0.9,"reply":"主动参与的话题"}');
+    await createProactiveEngine().check(f.deps);
+    assert.ok(f.runtime.state('group_10').focus);
+    f.deps.requestChatCompletion = async () => completion('{"respond":true,"reply":"好的白玉楼"}');
+    const handle = createMessageHandler(f.deps);
+    await handle(f.ws, event(4, '不要叫我椰果，叫我白玉楼就行', false));
+    assert.deepEqual(f.sends, ['主动参与的话题', '好的白玉楼']);
+    await handle(f.ws, event(5, '', false, { message: [{ type: 'at', data: { qq: '30' } }, { type: 'text', data: { text: '你怎么看' } }] }));
+    assert.equal(f.sends.length, 2); assert.match(f.logs.at(-1).text, /消息有明确指向/);
+});
+
+test('mention positions survive normalization without changing keyword and command text', () => {
+    const chain = [{ type: 'text', data: { text: '风堇，' } }, { type: 'at', data: { qq: '30' } }, { type: 'text', data: { text: '叫老猫，' } }, { type: 'at', data: { qq: '40' } }, { type: 'text', data: { text: '叫老王' } }];
+    const m = normalizeMessage(event(1, '', false, { message: chain }), { botQQ: '999' });
+    assert.equal(m.text, '风堇，叫老猫，叫老王');
+    assert.match(m.contentText, /风堇，.*QQ:30.*叫老猫，.*QQ:40.*叫老王/);
+    const cq = normalizeMessage(event(2, '', false, { message: undefined, raw_message: '[CQ:at,qq=999] [CQ:at,qq=all] [CQ:at,qq=30] 这是老猫' }), {});
+    assert.match(cq.contentText, /@机器人 QQ:999/); assert.match(cq.contentText, /@全体成员/); assert.match(cq.observation, /QQ:30/);
+});
+test('current model input, logs and memory evidence retain the introduced member identity', async () => {
+    const f = fixture({ persistMem: true, customKeywords: ['风堇'] }); let evidence;
+    f.memory.getPersistentMemory = () => [{ source: 'group_10', memberId: '30', memberKind: 'name', value: '菲比啾比', fact: '30的群名片：菲比啾比' }];
+    f.memory.extractFacts = async (_config, snapshot) => { evidence = snapshot; };
+    const handle = createMessageHandler(f.deps);
+    await handle(f.ws, event(1, '', false, { message: [{ type: 'text', data: { text: '风堇，' } }, { type: 'at', data: { qq: '30' } }, { type: 'text', data: { text: '这是老猫，记住他的外号' } }] }));
+    const users = f.calls[0].filter(m => m.role === 'user');
+    assert.match(users.at(-1).content, /发送者: 群名片\(20\).*QQ:30.*老猫/);
+    assert.match(JSON.stringify(f.calls[0]), /菲比啾比/);
+    assert.match(f.logs.find(l => l.kind === 'in').text, /QQ:30/);
+    assert.deepEqual(f.sessions.group_10[0].mentions, ['30']);
+    assert.deepEqual(evidence[0].mentions, ['30']); assert.match(evidence[0].content, /QQ:30.*老猫/);
+});
+
+test('extension media uses acknowledged pipeline and failed media does not invent sent history', async () => {
+    const f = fixture({ enableStickers: true, stickers: [{ id: 'smile', meaning: '开心', scope: '', data: 'data:image/png;base64,aGVsbG8=' }] });
+    f.deps.requestChatCompletion = async () => completion('好呀 [[sticker:smile]]');
+    f.deps.sendToQQ = async (_ws, message) => { f.sends.push(message); if (Array.isArray(message)) throw new Error('delivery failed'); return { messageId: '111' }; };
+    await createMessageHandler(f.deps)(f.ws, event(987));
+    assert.equal(f.sends.length, 2);
+    assert.equal(f.sessions.group_10.at(-1).content, '好呀');
+    assert.ok(!JSON.stringify(f.sessions).includes('sticker:'));
+});
+
+test('video cards become readable links and malformed card data is ignored', () => {
+    const card = { type: 'json', data: { data: JSON.stringify({ meta: { detail_1: { qqdocurl: 'https://b23.tv/example' } } }) } };
+    assert.match(normalizeMessage(event(901, '', false, { message: [card] }), {}).text, /https:\/\/b23.tv\/example/);
+    card.data.data = '{broken'; assert.equal(normalizeMessage(event(902, '', false, { message: [card] }), {}).text, '');
+});
+test('explicit teaching needs permission, works without a model key and stays in source session', async () => {
+    const f = fixture({ apiKey: '', stickerLearning: 'owner', masterQQ: '99' }); const stored=[];
+    f.deps.stickerStore = { list:()=>[], add: async input=>stored.push(input) };
+    f.deps.prepareVisionImages = async () => ({ images:['data:image/png;base64,aGVsbG8='], errors:[] });
+    const input = n => event(n, '', false, { message:[{type:'text',data:{text:'/收录表情 无语'}},{type:'image',data:{url:'https://example.com/a.png'}}] });
+    const handle = createMessageHandler(f.deps);
+    await handle(f.ws,input(910)); assert.equal(stored.length,0); assert.match(f.sends[0], /仅主人/);
+    f.config.stickerLearning='members'; await handle(f.ws,input(911));
+    assert.equal(stored.length,1); assert.equal(stored[0].scope,'group_10'); assert.equal(stored[0].source,'chat:20'); assert.equal(f.calls.length,0);
+});
+
+test('affect controls never reach QQ or history and only confirmed replies update expression state', async () => {
+    const { createAffect } = require('../lib/extensions/affect');
+    const f = fixture({ enableAffect:true }); const affect=createAffect(); f.deps.affect=affect;
+    f.deps.requestChatCompletion=async()=>completion('哈哈 [[affect:{"mood":"playful","evidence":"真的笑死我了"}]]');
+    f.deps.sendToQQ=async()=>{throw new Error('offline');};
+    const handle=createMessageHandler(f.deps);
+    await handle(f.ws,event(990,'这个梗真的笑死我了')); assert.equal(affect.status().count,0);
+    // Handler captures its sender once; a fresh handler uses the restored transport.
+    f.deps.sendToQQ=async(_ws,text)=>{f.sends.push(text);return {messageId:'991'};};
+    await createMessageHandler(f.deps)(f.ws,event(991,'这个梗真的笑死我了'));
+    assert.deepEqual(f.sends,['哈哈']); assert.equal(affect.status().count,1);
+    assert.doesNotMatch(JSON.stringify(f.sessions),/affect:/);
+});

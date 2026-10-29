@@ -1,93 +1,125 @@
-/**
- * 不经过 NapCat 的模型测试页。
- *
- * 请求仍使用当前已保存的后端配置，并写入独立 test_default 会话。切换主人/普通用户
- * 用于验证关系提示词，不会伪造真实 QQ 连接或向群聊发送消息。
- */
-import React from 'react';
-import { FlaskConical, Send, Trash2 } from 'lucide-react';
-import { Button, PageHeader, Section, SelectField, TabContent } from '../UIComponents';
+/** Local conversation workspace; requests use the saved backend configuration. */
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowDown, Check, Copy, Flower2, MessageCircle } from 'lucide-react';
+import { Button, IconButton } from '../UIComponents';
+import PinkSelect from '../PinkSelect';
+import '../../styles/conversation.css';
+
+const IDENTITIES = [{ value: 'master', label: '主人' }, { value: 'stranger', label: '普通用户' }];
+const EXAMPLES = ['你最近有什么喜欢的东西？', '以后叫我小白就好', '我们换个轻松的话题吧'];
 
 export default function TestTab({
-    testMessages, testInput, testIsMaster, testLoading,
-    setTestInput, setTestIsMaster, sendTestMessage, clearTestChat
+    testMessages = [], testInput = '', testIsMaster, testLoading,
+    setTestInput, setTestIsMaster, sendTestMessage, clearTestChat,
+    charName = '风堇', configDirty = false, onSaveConfig, clearing = false, error,
 }) {
+    const transcriptRef = useRef(null), inputRef = useRef(null), followRef = useRef(true), composingRef = useRef(false);
+    const copyTimer = useRef(null);
+    const [following, setFollowing] = useState(true);
+    const [copyState, setCopyState] = useState(null);
+    const name = charName?.trim() || '风堇';
+    const busy = Boolean(testLoading || clearing);
+
+    useEffect(() => () => clearTimeout(copyTimer.current), []);
+    useEffect(() => {
+        const panel = transcriptRef.current;
+        if (panel && followRef.current) panel.scrollTop = panel.scrollHeight;
+    }, [testMessages, testLoading]);
+    useLayoutEffect(() => {
+        const input = inputRef.current;
+        if (!input) return;
+        input.style.height = 'auto';
+        input.style.height = `${Math.min(input.scrollHeight, 136)}px`;
+    }, [testInput]);
+
+    const scrollToLatest = () => {
+        followRef.current = true;
+        setFollowing(true);
+        const panel = transcriptRef.current;
+        if (panel) panel.scrollTop = panel.scrollHeight;
+    };
+    const send = () => {
+        if (busy || !testInput.trim()) return;
+        scrollToLatest();
+        sendTestMessage();
+    };
+    const copyReply = async (text, index) => {
+        clearTimeout(copyTimer.current);
+        try {
+            await navigator.clipboard.writeText(String(text || ''));
+            setCopyState({ index, success: true });
+        } catch {
+            setCopyState({ index, success: false });
+        }
+        copyTimer.current = setTimeout(() => setCopyState(null), 2200);
+    };
+
     return (
-        <TabContent>
-            <PageHeader
-                icon={FlaskConical}
-                title="对话测试"
-                description="不经过 QQ，直接验证当前人设、记忆和模型配置。"
-                actions={<Button icon={Trash2} variant="danger" onClick={clearTestChat}>清空会话</Button>}
-            />
-
-            <Section>
-                <div className="flex min-h-[600px] flex-col">
-                    <div className="flex items-end justify-between gap-4 border-b border-pink-100 bg-white/30 p-4">
-                        <div className="w-full max-w-[220px]">
-                            <SelectField
-                                label="测试身份"
-                                value={testIsMaster ? 'master' : 'stranger'}
-                                onChange={(e) => setTestIsMaster(e.target.value === 'master')}
-                            >
-                                <option value="master">主人</option>
-                                <option value="stranger">普通用户</option>
-                            </SelectField>
-                        </div>
-                        <span className="hidden text-xs text-gray-400 sm:block">测试消息会写入 test_default 会话</span>
-                    </div>
-
-                    <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto bg-gradient-to-br from-pink-50/50 via-white/30 to-sky-50/50 p-5">
-                        {testMessages.length === 0 && (
-                            <div className="flex h-full min-h-[380px] flex-col items-center justify-center text-gray-400">
-                                <FlaskConical className="mb-3 h-8 w-8" />
-                                <div className="text-sm">发送一条消息开始测试</div>
-                            </div>
-                        )}
-                        {testMessages.map((message, index) => (
-                            <div key={index} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[80%] rounded-2xl border px-3.5 py-2.5 text-sm leading-6 ${
-                                    message.role === 'user'
-                                        ? 'rounded-tr-md border-pink-400 bg-gradient-to-r from-pink-500 to-rose-500 text-white shadow-md shadow-pink-100'
-                                        : message.role === 'system'
-                                            ? 'border-red-200 bg-red-50 text-red-700'
-                                            : 'rounded-tl-md border-sky-100 bg-white/90 text-gray-700 shadow-sm'
-                                }`}>
-                                    <p className="whitespace-pre-wrap break-words">{message.content}</p>
-                                    {message.isImage && <p className="mt-2 border-t border-current/20 pt-2 text-xs">生图指令：{message.imagePrompt}</p>}
-                                </div>
-                            </div>
-                        ))}
-                        {testLoading && (
-                            <div className="flex justify-start">
-                                <div className="rounded-2xl rounded-tl-md border border-pink-100 bg-white/90 px-3.5 py-2.5 text-sm text-pink-400 shadow-sm">
-                                    <span className="animate-pulse">模型正在思考...</span>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="flex gap-2 border-t border-pink-100 bg-white/45 p-4">
-                        <input
-                            type="text"
-                            value={testInput}
-                            onChange={(e) => setTestInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendTestMessage()}
-                            placeholder="输入测试消息，按 Enter 发送"
-                            className="ui-input"
-                            disabled={testLoading}
-                        />
-                        <Button
-                            icon={Send}
-                            variant="primary"
-                            onClick={sendTestMessage}
-                            disabled={testLoading || !testInput.trim()}
-                        >
-                            发送
-                        </Button>
-                    </div>
+        <section className="conversation-workspace" aria-label="对话测试">
+            <header className="conversation-heading">
+                <div className="conversation-title"><MessageCircle aria-hidden="true" /><h1>对话测试</h1></div>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={clearTestChat}>
+                    {clearing ? '清空中' : '清空'}
+                </Button>
+            </header>
+            {configDirty && (
+                <div className="conversation-config-note" role="status">
+                    <span>配置有未保存的修改</span>
+                    {onSaveConfig && <button type="button" onClick={onSaveConfig}>保存配置</button>}
                 </div>
-            </Section>
-        </TabContent>
+            )}
+            <div className="conversation-card">
+                <div className="conversation-toolbar">
+                    <div className="conversation-identity"><span className="conversation-presence" /><strong>{name}</strong><span className="conversation-saved-label">已保存配置</span></div>
+                    <fieldset className="conversation-identity-select" disabled={busy}>
+                        <legend className="sr-only">测试身份</legend>
+                        <PinkSelect label="测试身份" value={testIsMaster ? 'master' : 'stranger'} options={IDENTITIES} onChange={value => setTestIsMaster(value === 'master')} />
+                    </fieldset>
+                </div>
+                <div className="conversation-history-wrap">
+                    <div ref={transcriptRef} className="conversation-history custom-scrollbar" aria-label="聊天记录" role="log" aria-live="polite" aria-relevant="additions" aria-busy={Boolean(testLoading)} onScroll={event => {
+                        const panel = event.currentTarget;
+                        const next = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 56;
+                        followRef.current = next;
+                        setFollowing(next);
+                    }}>
+                        {testMessages.length === 0 && !testLoading && <div className="conversation-empty">
+                            <div className="conversation-empty-mark"><Flower2 aria-hidden="true" /></div>
+                            <h2>和{name}聊聊</h2>
+                            <p>从一句话开始</p>
+                            <div className="conversation-examples">{EXAMPLES.map(example => <button type="button" key={example} disabled={clearing} onClick={() => { setTestInput(example); inputRef.current?.focus(); }}>{example}</button>)}</div>
+                        </div>}
+                        {testMessages.map((message, index) => {
+                            const isUser = message.role === 'user', isSystem = message.role === 'system';
+                            const copied = copyState?.index === index;
+                            return <article key={message.id || index} className={`conversation-message ${isUser ? 'is-user' : isSystem ? 'is-system' : 'is-assistant'}`}>
+                                {!isSystem && <span className="conversation-message-author">{isUser ? '你' : name}</span>}
+                                <div className="conversation-message-bubble">
+                                    <p>{String(message.content || '')}</p>
+                                    {message.isImage && message.imagePrompt && <p className="conversation-image-prompt">{message.imagePrompt}</p>}
+                                </div>
+                                {!isUser && !isSystem && <div className="conversation-message-actions">
+                                    <IconButton icon={copied && copyState.success ? Check : Copy} label={copied ? (copyState.success ? '已复制' : '复制失败') : '复制回复'} onClick={() => copyReply(message.content, index)} />
+                                    {copied && <span role="status">{copyState.success ? '已复制' : '复制失败'}</span>}
+                                </div>}
+                            </article>;
+                        })}
+                        {testLoading && <div className="conversation-thinking" role="status" aria-label={`${name}正在思考`}><span /><span /><span /></div>}
+                    </div>
+                    {!following && testMessages.length > 0 && <button type="button" className="conversation-latest" onClick={scrollToLatest}><ArrowDown size={13} />回到最新</button>}
+                </div>
+                {error && <div className="conversation-error" role="alert">{String(error)}</div>}
+                <form className="conversation-composer" onSubmit={event => { event.preventDefault(); send(); }}>
+                    <textarea ref={inputRef} rows={2} value={testInput} disabled={clearing} aria-label="测试消息" placeholder="想说些什么…" className="conversation-input custom-scrollbar"
+                        onChange={event => setTestInput(event.target.value)}
+                        onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }}
+                        onKeyDown={event => {
+                            if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229) return;
+                            event.preventDefault(); send();
+                        }} />
+                    <div className="conversation-composer-footer"><span>Enter 发送 · Shift + Enter 换行</span><Button type="submit" variant="primary" size="sm" disabled={busy || !testInput.trim()}>发送</Button></div>
+                </form>
+            </div>
+        </section>
     );
 }

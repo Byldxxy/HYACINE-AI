@@ -34,7 +34,12 @@ class WindowWorld {
         this.climbDirection = -1;
     }
     setArea(area) { if (finiteRect(area)) this.area = area; }
-    setActor(actor) { Object.assign(this.actor, actor); }
+    setActor(actor) {
+        for (const key of ['x', 'y', 'radius', 'height']) {
+            const value = actor?.[key];
+            if (Number.isFinite(value) && Math.abs(value) < 2147483647 && (!['radius', 'height'].includes(key) || value > 0)) this.actor[key] = value;
+        }
+    }
     setWindows(windows) {
         this.windows = windows;
         if (!this.attachment) return;

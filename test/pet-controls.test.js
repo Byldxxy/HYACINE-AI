@@ -22,16 +22,16 @@ test('safe viewport excludes taskbar overflow and handles negative monitor coord
     assert.deepEqual(visiblePetViewport({ x: 500, y: 565, width: 280, height: 400 }, { x: 0, y: 0, width: 1200, height: 900 }), { x: 0, y: 0, width: 280, height: 335 });
     assert.deepEqual(visiblePetViewport({ x: -1250, y: -100, width: 280, height: 400 }, { x: -1200, y: -50, width: 1200, height: 900 }), { x: 50, y: 50, width: 230, height: 350 });
 });
-function setup() {
+function setup(World = WindowWorld) {
     let tick, time = 0;
-    const sandbox = { require: name => name === './window-world' ? { WindowWorld } : { readWindowList: async () => [] }, module: { exports: {} }, process: { platform: 'darwin', pid: 123 }, Date: { now: () => time }, setInterval: fn => { tick = fn; return { unref() {} }; }, clearInterval() {} };
+    const sandbox = { console: { warn() {} }, require: name => name === './window-world' ? { WindowWorld: World } : { readWindowList: async () => [] }, module: { exports: {} }, process: { platform: 'darwin', pid: 123 }, Date: { now: () => time }, setInterval: fn => { tick = fn; return { unref() {} }; }, clearInterval() {} };
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../electron/window-companion.js'), 'utf8'), sandbox);
     const bounds = { x: 500, y: 520, width: 280, height: 400 };
     const win = { isDestroyed: () => false, isVisible: () => true, getBounds: () => ({ ...bounds }), setPosition: (x, y) => Object.assign(bounds, { x, y }), webContents: { send() {} } };
     const service = sandbox.module.exports.createWindowCompanion({ getWindow: () => win, screen: { getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 1200, height: 900 } }) } });
     service.updateMetrics({ anchorX: 140, anchorY: 335, radius: 30, height: 300 });
     service.start(); service.setEnabled(true);
-    return { service, bounds, tick: () => { time += 33; tick(); } };
+    return { service, bounds, win, tick: () => { time += 33; tick(); } };
 }
 test('independent native menu and renderer pauses cannot resume each other, including falling', () => {
     const { service: s, bounds, tick } = setup();
@@ -64,4 +64,49 @@ test('pointer hover allows a fall to finish, then keeps the landed pet still', (
     const landed = { ...bounds };
     for (let i = 0; i < 60; i++) tick();
     assert.deepEqual(bounds, landed); s.stop();
+});
+
+
+test('invalid actor updates cannot overwrite geometry', () => {
+    const world = new WindowWorld();
+    const before = { ...world.actor };
+    world.setActor({ x: NaN, y: Infinity, radius: undefined, height: -1 });
+    assert.deepEqual(world.actor, before);
+    world.setActor({ x: 2 ** 40, y: '100' });
+    assert.deepEqual(world.actor, before);
+});
+
+test('invalid computed positions recover before native movement and the next tick resumes', () => {
+    for (const invalid of [NaN, Infinity, 2 ** 40]) {
+        class BrokenOnce extends WindowWorld {
+            tick(dt) {
+                if (!this.broken) { this.broken = true; this.actor.x = invalid; return this.snapshot(); }
+                return super.tick(dt);
+            }
+        }
+        const { service, bounds, win, tick } = setup(BrokenOnce);
+        let moves = 0;
+        win.setPosition = (x, y) => {
+            assert.ok(Number.isInteger(x) && Math.abs(x) < 2147483648);
+            assert.ok(Number.isInteger(y) && Math.abs(y) < 2147483648);
+            moves++; Object.assign(bounds, { x, y });
+        };
+        tick();
+        assert.equal(moves, 0);
+        assert.ok(Number.isFinite(service.getState().x));
+        tick();
+        assert.ok(moves > 0);
+        service.stop();
+    }
+});
+
+test('a native movement failure does not escape the timer', () => {
+    const { service, win, tick } = setup();
+    const move = win.setPosition;
+    win.setPosition = () => { throw new TypeError('conversion failure'); };
+    assert.doesNotThrow(tick);
+    assert.equal(service.getState().status, 'window-move-unavailable');
+    win.setPosition = move;
+    assert.doesNotThrow(tick);
+    service.stop();
 });

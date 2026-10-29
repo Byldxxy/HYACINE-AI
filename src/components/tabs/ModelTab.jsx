@@ -4,12 +4,13 @@
  * API Key 显示值可能是后端返回的脱敏占位符，保存逻辑会保留真实值。角色参考图列表来自
  * data/avatars，它用于生图身份基底，不是 Electron PMX 模型或 Web 看板娘图片。
  */
-import React from 'react';
-import { Image as ImageIcon, MessageSquare, RefreshCw } from 'lucide-react';
+import React, { useState } from 'react';
+
 import {
     Button,
     InputGroup,
     PageHeader,
+    PageTabs,
     RangeField,
     Section,
     TabContent,
@@ -17,15 +18,17 @@ import {
 } from '../UIComponents';
 import { assetUrl } from '../../lib/api';
 
-export default function ModelTab({ config, handleChange, avatarList, fetchAvatars, setCharacterMessage }) {
+export default function ModelTab({ config, handleChange, avatarList, fetchAvatars }) {
+    const [section, setSection] = useState('chat');
     return (
         <TabContent>
             <PageHeader
-                icon={MessageSquare}
                 title="模型与回复"
                 description="配置文本、生图模型以及机器人输出行为。"
             />
 
+            <PageTabs label="模型设置分类" value={section} onChange={setSection} options={[{value:'chat',label:'对话与识图'},{value:'image',label:'图片生成'}]} />
+            {section === 'chat' && <>
             <Section title="API 与模型" description="支持 OpenAI Chat Completions 兼容接口；识图需要文本模型支持视觉输入。">
                 <div className="grid gap-4 md:grid-cols-2">
                     <InputGroup label="文本 API Endpoint" value={config.apiEndpoint} onChange={(e) => handleChange('apiEndpoint', e.target.value)} />
@@ -35,17 +38,7 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
                         type="password"
                         value={config.apiKey}
                         onChange={(e) => handleChange('apiKey', e.target.value)}
-                        onFocus={() => setCharacterMessage('API Key 已在界面中隐藏显示。')}
                     />
-                    <div />
-                    <InputGroup
-                        label="生图 API Endpoint"
-                        hint="留空时复用文本 API Endpoint"
-                        placeholder="可选"
-                        value={config.imageEndpoint || ''}
-                        onChange={(e) => handleChange('imageEndpoint', e.target.value)}
-                    />
-                    <InputGroup label="生图模型" placeholder="例如 gemini-2.5-flash-image" value={config.imageModel} onChange={(e) => handleChange('imageModel', e.target.value)} />
                 </div>
             </Section>
 
@@ -69,12 +62,6 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
                         onChange={(e) => handleChange('maxReplyLength', Number(e.target.value))}
                     />
                     <Toggle
-                        checked={Boolean(config.optimizeImgPrompt)}
-                        onChange={(value) => handleChange('optimizeImgPrompt', value)}
-                        label="智能优化生图提示词"
-                        description="调用文本模型优化或翻译用户提示词。"
-                    />
-                    <Toggle
                         checked={Boolean(config.enableSplit)}
                         onChange={(value) => handleChange('enableSplit', value)}
                         label="拟人化分段发送"
@@ -83,14 +70,33 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
                 </div>
             </Section>
 
+            </>}
+            {section === 'image' && <>
+            <Section title="图片生成" description="使用与文本模型共用的 API Key。">
+                <div className="grid gap-4 md:grid-cols-2">
+                    <InputGroup
+                        label="生图 API Endpoint"
+                        hint="留空时复用文本 API Endpoint"
+                        placeholder="可选"
+                        value={config.imageEndpoint || ''}
+                        onChange={(e) => handleChange('imageEndpoint', e.target.value)}
+                    />
+                    <InputGroup label="生图模型" placeholder="例如 gemini-2.5-flash-image" value={config.imageModel} onChange={(e) => handleChange('imageModel', e.target.value)} />
+                    <Toggle
+                        checked={Boolean(config.optimizeImgPrompt)}
+                        onChange={(value) => handleChange('optimizeImgPrompt', value)}
+                        label="智能优化生图提示词"
+                        description="调用文本模型优化或翻译用户提示词。"
+                    />
+                </div>
+            </Section>
             <Section
                 title="角色参考图"
                 description="参考图存放于 data/avatars，用于支持图生图的模型。"
-                action={<Button icon={RefreshCw} onClick={fetchAvatars}>刷新</Button>}
+                action={<Button onClick={fetchAvatars}>刷新</Button>}
             >
                 {avatarList.length === 0 ? (
                     <div className="empty-state">
-                        <ImageIcon className="mb-2 h-6 w-6 text-gray-400" />
                         data/avatars 中暂无图片
                     </div>
                 ) : (
@@ -101,6 +107,7 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
                                 <button
                                     type="button"
                                     key={avatar.id}
+                                    aria-pressed={selected}
                                     onClick={() => {
                                         handleChange('currentPersonaId', avatar.id);
                                         handleChange('currentPersonaFileName', avatar.fileName);
@@ -120,6 +127,7 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
                     </div>
                 )}
             </Section>
+            </>}
         </TabContent>
     );
 }

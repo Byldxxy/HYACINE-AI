@@ -217,7 +217,8 @@ function compareSignatures(previous, current) {
     return difference / (current.length * 255);
 }
 
-function createDesktopObserver({ sendFrame, onStatus }) {
+function createDesktopObserver({ sendFrame, onStatus, services = {} }) {
+    const runtime = { desktopCapturer, powerMonitor, screen, systemPreferences, getActiveApplication, ...services };
     // paused 是用户临时暂停；suspended 表示桌宠被隐藏。二者必须分开保存，
     // 否则重新显示桌宠会意外覆盖用户主动选择的暂停状态。
     let settings = normalizeDesktopAwarenessConfig();
@@ -225,6 +226,8 @@ function createDesktopObserver({ sendFrame, onStatus }) {
     let suspended = false;
     let timer = null;
     let scanning = false;
+    let generation = 0;
+    let stopped = false;
     let lastSentAt = 0;
     let lastActivityKey = '';
     let lastSignature = null;
@@ -246,6 +249,7 @@ function createDesktopObserver({ sendFrame, onStatus }) {
     }
 
     async function scan({ force = false } = {}) {
+        if (stopped) return { ok: false, message: '桌面感知已停止' };
         // 所有高成本操作之前先执行状态、空闲和隐私门禁。force 仅绕过空闲/变化/间隔，
         // 不绕过“功能未启用”和“桌宠已隐藏”，以保持用户开关的语义。
         if (!settings.enabled) {
@@ -259,13 +263,22 @@ function createDesktopObserver({ sendFrame, onStatus }) {
         if (paused || scanning) {
             return { ok: false, message: scanning ? '桌面感知正在分析中' : '桌面感知已暂停' };
         }
-        if (!force && powerMonitor.getSystemIdleTime() >= 60) {
+        // No native query or capture is useful before the configured sampling interval.
+        if (!force && lastSentAt > 0 && Date.now() - lastSentAt < settings.intervalSeconds * 1000) {
+            reportStatus('watching');
+            return { ok: false, message: '尚未到达采样间隔' };
+        }
+        if (!force && runtime.powerMonitor.getSystemIdleTime() >= 60) {
             reportStatus('idle');
             return { ok: false, message: '检测到空闲，已暂停观察' };
         }
         scanning = true;
+        const scanGeneration = generation;
+        const isCurrent = () => !stopped && scanGeneration === generation && settings.enabled && !paused && !suspended;
+        const cancelled = { ok: false, message: '桌面感知状态已变更，本次采样已取消' };
         try {
-            const activity = await getActiveApplication();
+            const activity = await runtime.getActiveApplication();
+            if (!isCurrent()) return cancelled;
             if (!activity?.ownerName && !activity?.bundleId) {
                 reportStatus('window-unavailable');
                 return { ok: false, message: '无法读取当前前台应用' };
@@ -275,19 +288,20 @@ function createDesktopObserver({ sendFrame, onStatus }) {
                 return { ok: false, message: '当前前台应用命中隐私排除规则' };
             }
 
-            const sources = await desktopCapturer.getSources({
+            const sources = await runtime.desktopCapturer.getSources({
                 types: ['screen'],
                 thumbnailSize: CAPTURE_SIZE,
                 fetchWindowIcons: false,
             });
-            const source = selectPrimaryDisplaySource(sources);
+            if (!isCurrent()) return cancelled;
+            const source = selectPrimaryDisplaySource(sources, String(runtime.screen.getPrimaryDisplay().id));
             if (!source) {
                 reportStatus('screen-source-unavailable', '系统未返回可捕获的主显示器画面');
                 return { ok: false, message: '无法读取主显示器画面' };
             }
             if (source.thumbnail.isEmpty()) {
                 const screenPermission = process.platform === 'darwin'
-                    ? systemPreferences.getMediaAccessStatus('screen')
+                    ? runtime.systemPreferences.getMediaAccessStatus('screen')
                     : 'unknown';
                 if (screenPermission === 'denied') {
                     reportStatus('permission-denied', '请在系统设置中允许 HYACINE-AI 录制屏幕');
@@ -311,6 +325,7 @@ function createDesktopObserver({ sendFrame, onStatus }) {
 
             const dataUrl = `data:image/jpeg;base64,${source.thumbnail.toJPEG(55).toString('base64')}`;
             // 截图只以 data URL 驻留内存，不写入 data/、日志或会话文件。
+            if (!isCurrent()) return cancelled;
             sendFrame({
                 dataUrl,
                 capturedAt: Date.now(),
@@ -324,6 +339,7 @@ function createDesktopObserver({ sendFrame, onStatus }) {
             reportStatus('analyzing');
             return { ok: true };
         } catch (error) {
+            if (!isCurrent()) return cancelled;
             if (error.code === 'accessibility-required') {
                 reportStatus('accessibility-required', '请在系统设置中允许 HYACINE-AI 使用辅助功能');
                 return { ok: false, message: '缺少辅助功能权限' };
@@ -338,6 +354,7 @@ function createDesktopObserver({ sendFrame, onStatus }) {
 
     function start() {
         if (timer) return;
+        stopped = false;
         timer = setInterval(scan, SCAN_INTERVAL_MS);
         scan();
     }
@@ -345,10 +362,13 @@ function createDesktopObserver({ sendFrame, onStatus }) {
     function stop() {
         if (timer) clearInterval(timer);
         timer = null;
-        scanning = false;
+        stopped = true;
+        generation += 1;
+        // An in-flight native query still owns the scan lock until its finally block.
     }
 
     function updateConfig(config) {
+        generation += 1;
         const wasEnabled = settings.enabled;
         settings = normalizeDesktopAwarenessConfig(config);
         if (!settings.enabled) {
@@ -364,6 +384,7 @@ function createDesktopObserver({ sendFrame, onStatus }) {
     }
 
     function setSuspended(value) {
+        if (suspended !== Boolean(value)) generation += 1;
         suspended = Boolean(value);
         if (!settings.enabled) {
             reportStatus('disabled');
@@ -379,6 +400,7 @@ function createDesktopObserver({ sendFrame, onStatus }) {
 
     function togglePaused() {
         if (!settings.enabled) return false;
+        generation += 1;
         paused = !paused;
         reportStatus(paused ? 'paused' : 'watching');
         if (!paused) scan();

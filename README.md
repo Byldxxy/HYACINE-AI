@@ -1,12 +1,18 @@
 # HYACINE-AI
 
-一个面向 QQ 群聊的本地化 AI 机器人与桌宠项目。通过 NapCat / OneBot v11 接收 QQ 消息，连接 OpenAI Chat Completions 兼容模型，并提供角色设定、图片理解、生图、记忆、主动发言、Web 管理面板和 Electron 桌面互动。
+一个面向 QQ 群聊的本地化 AI 机器人与桌宠项目。通过 NapCat、SnowLuma（OneBot v11）或官方 QQ Bot 接收 QQ 消息，连接 OpenAI Chat Completions 兼容模型，并提供角色设定、图片理解、生图、记忆、主动发言、Web 管理面板和 Electron 桌面互动。
 
 [![CI](https://github.com/Byldxxy/HYACINE-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/Byldxxy/HYACINE-AI/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v1.2.2-ef5da8)](https://github.com/Byldxxy/HYACINE-AI/tree/v1.2.2)
+[![Release](https://img.shields.io/badge/release-v1.3.0-ef5da8)](https://github.com/Byldxxy/HYACINE-AI/tree/v1.3.0)
 [![License](https://img.shields.io/badge/license-MIT-2f855a)](./LICENSE)
 
+- [1.3.0 更新日志](./CHANGELOG.md)：新增能力、兼容性与升级说明。
+- [人格与记忆扩展评估](./HUMANIZATION_RESEARCH.md)：参考项目、兼容性、表达连续性和记忆召回。
+- [聊天扩展](./EXTENSIONS_GUIDE.md)：表情素材管理、B 站链接资料和扩展边界。
+- [QQ 渠道配置](./QQ_CHANNELS.md)：NapCat、SnowLuma 与官方 QQ Bot 的接入步骤和能力差异。
 - [消息处理架构](./BOT_LOGIC.md)：触发、旁听、主动发言、发送回执及记忆边界。
+- [WebUI 使用与结构](./WEBUI_GUIDE.md)：工作台导航、草稿保存、状态反馈与前端模块。
+- [角色表达与扩展](./CHARACTER_GUIDE.md)：风堇群聊预设、记忆选择与模块扩展入口。
 - [零基础使用手册](./USER_GUIDE.md)：安装 Git/Node.js、拉取源码、运行测试、连接 NapCat、生成 Windows EXE。
 - [统一菜单与尺寸调整](./CONTROLS_GUIDE.md)：右键入口、交互暂停和屏幕边缘布局。
 - [角色渲染与瞳孔控制](./RENDERING_GUIDE.md)：三渲二着色、近距离视线跟随与验证。
@@ -17,12 +23,15 @@
 
 ### QQ 对话
 
-- 支持 NapCat / OneBot v11 反向 WebSocket。
+- 可选 NapCat 反向 WebSocket、SnowLuma 正向 WebSocket 或官方 QQ Bot Webhook；一次启用一个渠道。
 - 支持 @ 机器人、句首唤醒词和全量回复三种触发方式。
-- 识别群聊发送者昵称、QQ、主人身份和群聊环境。
+- 按群与 QQ 号区分成员，支持群名片、外号和有来源的偏好记忆。
+- 支持围绕近期话题的多人免 @ 续聊，普通回复和主动发言均可承接；由上下文判断是否参与。
 - 兼容 OpenAI Chat Completions 风格的文本模型服务。
 - 同一会话串行处理，支持分段回复、引用机器人消息继续对话和会话重置。
-- 消息 ID 去重、排除自身回声；收到 OneBot 成功回执才写入回复记忆，失败或未知结果不自动重发。
+- 消息 ID 去重、排除自身回声；收到 OneBot 成功回执或官方消息 ID 才写入回复记忆，失败或未知结果不自动重发。
+
+官方渠道按平台授权接收群聊或单聊事件，身份独立存储，暂不启用定时主动发言；详细范围见 [QQ 渠道配置](./QQ_CHANNELS.md)。
 
 ### 图片理解与生图
 
@@ -33,16 +42,21 @@
 
 ### 记忆与主动互动
 
-- 短期上下文窗口、合并式长期摘要、按会话隔离的自动事实；手动事实可共享。
+- 短期上下文、独立问答线索、长期摘要与成员资料；自动学习群内黑话、教学知识和有依据的角色偏好。
+- 长期记忆统一支持分类添加、编辑和启停；人工固定内容优先于自动学习，按话题相关性与长度预算选择请求上下文。
 - 群聊主动发言保留间隔、冷却、置信度、上下文条数和目标群配置；仅基于新真人消息判断，普通回复优先，过期候选和重复内容会被拦截。
 - 配置、会话、摘要和长期事实采用校验、串行原子写入与备份恢复。
 
 ### Web 管理面板
 
-- 集中管理连接、模型、人设、记忆、主动发言和桌面感知。
-- 内置对话测试、图片测试、实时日志和脱敏诊断导出。
-- 看板娘支持隐藏和尺寸调节；隐藏后配置面板自动居中。
-- 首次启动保持 API Endpoint、模型名称、Key 和角色预设为空。
+- 连续云庭场景与生成式导航徽记；风堇支持招手、思考、微笑三种姿势，随页面和交互变化，可关闭动态效果。
+- 以工作台为入口，按对话、记忆、人设、模型、连接组织功能，延续粉色半透明面板与统一控件。
+- 工作台区分后端就绪、QQ 连接与模型配置状态，提供设置入口和最近活动；模型已配置不代表已完成连通性测试。
+- 配置采用独立编辑草稿，显示保存进度、错误和未保存状态；保存期间的新修改保留，记忆使用各自的保存入口。
+- 对话页使用独立测试会话，支持主人身份切换、输入法安全发送和清空确认；模型调用失败不写入后端聊天历史。
+- 提供可预览、编辑和撤销的风堇群聊预设，以及图片测试、实时日志和脱敏诊断导出。
+- `Cmd/Ctrl + K` 快速跳转，`Cmd/Ctrl + S` 保存配置；页面与日志延迟加载，遵循系统减少动态效果设置。
+- 看板娘支持切换本地立绘、隐藏和尺寸调节；隐藏后扩展工作区。首次启动保持 API Endpoint、模型名称、Key 和角色预设为空。
 
 ### Electron 桌宠
 
@@ -106,7 +120,7 @@ npm ci
 如需固定使用当前稳定版本：
 
 ```bash
-git checkout v1.2.2
+git checkout v1.3.0
 ```
 
 ### 本地环境变量
@@ -153,7 +167,7 @@ ws://127.0.0.1:3001
 
 ## 本地视觉资源
 
-仓库不包含第三方人物图片、MMD 模型、贴图、VMD 动作或音频。请只使用自行创作、已获授权或许可证允许使用的资源。
+WebUI 内置生成式装饰和角色姿势素材，来源见[界面素材说明](./src/assets/atelier/README.md)。仓库不包含本地原始人物立绘、MMD 模型、贴图、VMD 动作或音频。基础攀爬使用程序化动作及允许再分发的 Quaternius CC0 动画轨迹，来源见 [动作资源说明](./third_party/motions/quaternius/README.md)。个人模型与额外动作请使用自行创作、已获授权或许可证允许使用的资源。
 
 ```text
 public/
@@ -211,10 +225,11 @@ HYACINE-AI/
 ├── scripts/                  # 跨平台启动与发布边界检查
 ├── src/
 │   ├── components/           # WebUI 页面与共享控件
-│   ├── hooks/                # 配置、日志、桌宠状态 Hooks
+│   ├── hooks/                # 配置草稿、记忆、测试对话、运行状态与桌宠 Hooks
 │   └── pet/                  # Three.js 桌宠运行时、配置和覆盖层
 ├── test/                     # Node.js 单元与集成测试
 ├── server.js                 # Express / WebSocket 后端入口
+├── WEBUI_GUIDE.md            # 管理面板使用与结构
 ├── USER_GUIDE.md             # 零基础使用手册
 └── PROJECT_TRACKER.md        # 架构、状态和路线图
 ```
@@ -236,7 +251,7 @@ GitHub Actions 会在 Windows、macOS 和 Linux 上执行依赖安装、lint、�
 
 ## 当前版本与路线图
 
-当前源码版本为 `1.2.2`。已完成能力、稳定设计约束、验证基线、已知限制和后续优先级统一维护在 [PROJECT_TRACKER.md](./PROJECT_TRACKER.md)。
+当前源码版本为 `1.3.0`。已完成能力、稳定设计约束、验证基线、已知限制和后续优先级统一维护在 [PROJECT_TRACKER.md](./PROJECT_TRACKER.md)。
 
 ## 许可证
 

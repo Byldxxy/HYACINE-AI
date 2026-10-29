@@ -4,11 +4,27 @@
 
 /**
  * @typedef {Object} BotConfig
+ * @property {boolean} [enableAffect] - 按会话成员隔离的表达连续性
+ * @property {number} [affectHalfLife] - 情绪半衰期分钟
+ * @property {'balanced'|'focused'} [memoryRecallMode] - 长期记忆召回策略
+ * @property {boolean} [enableBilibili] - B站链接资料读取
+ * @property {'off'|'owner'|'members'} [stickerLearning] - 群内表情收录权限
+ * @property {boolean} [enableStickers] - 上下文表情选择
+ * @property {number} [stickerCooldown] - 每会话表情冷却秒数
+ * @property {Array<{id:string,meaning:string,scope:string,data:string}>} [stickers] - 受限大小的本地表情素材
  * @property {string} wsUrl - WebSocket URL (NapCat)
  * @property {string} httpPort - HTTP 端口
  * @property {string} botQQ - 机器人 QQ 号
  * @property {string[]} customKeywords - 自定义唤醒词
  * @property {string} apiEndpoint - OpenAI 兼容 API 端点
+ * @property {'napcat'|'snowluma'|'qqbot'} [qqProvider] - 当前启用的 QQ 接入渠道
+ * @property {string} [onebotToken] - NapCat 反向 WS Bearer Token（接口脱敏）
+ * @property {string} [snowlumaUrl] - SnowLuma OneBot 正向 WS 地址
+ * @property {string} [snowlumaToken] - SnowLuma WS Token（接口脱敏）
+ * @property {string} [qqBotAppId] - 官方 QQ Bot AppID
+ * @property {string} [qqBotSecret] - 官方 AppSecret（接口脱敏）
+ * @property {string} [qqBotMasterId] - 当前官方应用的主人 OpenID
+ * @property {boolean} [qqBotSandbox] - 官方沙箱环境
  * @property {string} apiKey - API Key (运行时真实值，传输时脱敏)
  * @property {string} modelName - 文本模型名称
  * @property {string} imageEndpoint - 生图 API 端点 (可选)

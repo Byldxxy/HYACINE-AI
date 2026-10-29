@@ -19,7 +19,13 @@ public/character.*
 public/tray_icon.*
 public/vite.svg
 public/pet-manifest.json
-src/assets/
+src/assets/*
+!src/assets/sky-garden.jpg
+!src/assets/atelier/
+src/assets/atelier/*
+!src/assets/atelier/emblems.png
+!src/assets/atelier/hyacine-poses.png
+!src/assets/atelier/README.md
 *.local
 
 # Environment variables

@@ -2,10 +2,10 @@
  * 连接与触发配置页。
  *
  * 管理 OneBot 连接、群聊触发、主动发言和桌面感知参数。desktopAwareness 是只读运行状态，
- * config 是尚未保存的表单草稿；更改参数后仍需点击面板底部“保存所有配置”。
+ * config 是尚未保存的表单草稿；更改参数后仍需点击面板底部“保存配置”。
  */
-import React from 'react';
-import { Activity, Cpu, Download, Plus, ScanEye, ShieldCheck, X } from 'lucide-react';
+import React, { useState } from 'react';
+import { X } from 'lucide-react';
 import {
     Button,
     IconButton,
@@ -16,6 +16,8 @@ import {
     TabContent,
     Toggle,
 } from '../UIComponents';
+import PinkSelect from '../PinkSelect';
+import { qqChannelLabel, qqConnectionLabel } from '../../lib/qqChannels';
 import { apiUrl } from '../../lib/api';
 
 const DESKTOP_STATUS = {
@@ -37,7 +39,15 @@ const DESKTOP_STATUS = {
     error: ['观察异常', 'bg-red-50 text-red-700'],
 };
 
-export default function ConnectTab({ config, handleChange, addKeyword, removeKeyword, desktopAwareness }) {
+export default function ConnectTab({ config, handleChange, removeKeyword, desktopAwareness, onLog, runtimeStatus }) {
+    const provider = config.qqProvider || 'napcat';
+    const official = provider === 'qqbot';
+    const [keyword, setKeyword] = useState('');
+    const addKeyword = () => {
+        const value = keyword.trim();
+        if (value && !(config.customKeywords || []).includes(value)) handleChange('customKeywords', [...(config.customKeywords || []), value]);
+        setKeyword('');
+    };
     const targetGroups = config.proactiveTargetGroups || [];
     const excludedTerms = config.desktopAwarenessExcludedTerms || [];
     const [desktopStatusLabel, desktopStatusClass] = DESKTOP_STATUS[desktopAwareness?.status]
@@ -58,39 +68,56 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
             link.click();
             URL.revokeObjectURL(blobUrl);
         } catch (error) {
-            console.error('导出诊断失败:', error);
+            onLog?.('error', `导出诊断失败：${error.message}`);
         }
     };
 
     return (
         <TabContent>
             <PageHeader
-                icon={Cpu}
                 title="连接与触发"
-                description="设置 OneBot 连接、消息唤醒方式和主动发言策略。"
-                actions={<Button icon={Download} onClick={downloadDiagnostics}>导出诊断</Button>}
+                description="选择 QQ 接入渠道，设置消息触发与参与策略。"
+                actions={<Button onClick={downloadDiagnostics}>导出诊断</Button>}
             />
 
-            <Section title="连接信息" description="NapCat 使用反向 WebSocket 连接到机器人后端。">
+            <Section title="接入渠道" description="一次启用一个渠道，保存配置后切换。">
                 <div className="grid gap-4 md:grid-cols-2">
-                    <InputGroup label="NapCat 反向 WebSocket 地址" value={config.wsUrl} onChange={(e) => handleChange('wsUrl', e.target.value)} />
-                    <InputGroup label="机器人 QQ" placeholder="用于检测 @ 消息" value={config.botQQ} onChange={(e) => handleChange('botQQ', e.target.value)} />
+                    <div className="field-group"><span className="field-label">渠道</span><PinkSelect label="QQ 接入渠道" value={provider} onChange={value => handleChange('qqProvider', value)} options={[{ value: 'napcat', label: 'NapCat · 反向 WebSocket' }, { value: 'qqbot', label: '官方 QQ Bot · Webhook' }, { value: 'snowluma', label: 'SnowLuma · 正向 WebSocket' }]} /></div>
+                    <div className="field-group"><span className="field-label">当前运行</span><p className="text-sm text-gray-500 py-2">{qqChannelLabel(runtimeStatus?.qq?.provider)} · {qqConnectionLabel(runtimeStatus?.qq)}</p></div>
+                    {provider === 'napcat' && <>
+                        <label className="field-group"><span className="field-label">反向 WebSocket 地址</span><input className="ui-input" value={config.wsUrl || ''} readOnly /><span className="field-hint">填入 NapCat 反向 WebSocket 设置。</span></label>
+                        <InputGroup label="OneBot Access Token" type="password" value={config.onebotToken} onChange={e => handleChange('onebotToken', e.target.value)} hint="可选；两端需一致，使用 Bearer 请求头。" />
+                    </>}
+                    {provider === 'snowluma' && <>
+                        <InputGroup label="SnowLuma WebSocket 地址" value={config.snowlumaUrl} placeholder="ws://127.0.0.1:3002/" onChange={e => handleChange('snowlumaUrl', e.target.value)} hint="填写 SnowLuma 的 OneBot WS 服务地址，不是 WebUI 地址；端口需与本后端区分。" />
+                        <InputGroup label="SnowLuma WS Token" type="password" value={config.snowlumaToken} onChange={e => handleChange('snowlumaToken', e.target.value)} hint="与 SnowLuma WS 服务的 Token 一致。" />
+                    </>}
+                    {!official && <InputGroup label="机器人 QQ" placeholder="用于校验接入账号" value={config.botQQ} onChange={e => handleChange('botQQ', e.target.value)} />}
+                    {official && <>
+                        <InputGroup label="AppID" value={config.qqBotAppId} onChange={e => handleChange('qqBotAppId', e.target.value)} />
+                        <InputGroup label="AppSecret" type="password" value={config.qqBotSecret} onChange={e => handleChange('qqBotSecret', e.target.value)} />
+                        <InputGroup label="主人 OpenID" value={config.qqBotMasterId} onChange={e => handleChange('qqBotMasterId', e.target.value)} hint="可选；填当前应用的成员 OpenID，不是 QQ 号。" />
+                        <Toggle label="沙箱环境" checked={Boolean(config.qqBotSandbox)} onChange={value => handleChange('qqBotSandbox', value)} />
+                        <label className="field-group md:col-span-2"><span className="field-label">Webhook 回调路径</span><input className="ui-input" value="/api/qqbot/webhook" readOnly /><span className="field-hint">在开放平台填入「公网 HTTPS 域名 + 此路径」，反向代理只转发这个路径。</span></label>
+                        <p className="field-hint md:col-span-2">支持群聊与单聊的文本、图片收发。订阅 GROUP_AT_MESSAGE_CREATE、C2C_MESSAGE_CREATE；全量群消息依赖平台权限。会话与 NapCat / SnowLuma 独立，定时主动发言在官方渠道停用。</p>
+                    </>}
                 </div>
             </Section>
 
-            <Section title="消息触发" description="机器人默认响应 @ 消息，也可以增加固定唤醒词。">
+            <Section title="消息触发" description="对接收到的消息进行判断；平台未推送的消息无法参与判断。">
                 <div className="space-y-4">
                     <div className="field-group">
                         <span className="field-label">自定义唤醒词</span>
                         <div className="flex gap-2">
                             <input
-                                id="keyword-input"
+                                value={keyword}
+                                onChange={e => setKeyword(e.target.value)}
                                 type="text"
                                 placeholder="例如：助手，"
                                 className="ui-input"
-                                onKeyDown={(e) => e.key === 'Enter' && addKeyword()}
+                                onKeyDown={(e) => e.key === 'Enter' && !e.nativeEvent.isComposing && addKeyword()}
                             />
-                            <Button icon={Plus} onClick={addKeyword}>添加</Button>
+                            <Button onClick={addKeyword}>添加</Button>
                         </div>
                         <div className="flex min-h-8 flex-wrap gap-2 pt-1">
                             {(config.customKeywords || []).map((keyword) => (
@@ -100,7 +127,7 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                                 </span>
                             ))}
                             {(!config.customKeywords || config.customKeywords.length === 0) && (
-                                <span className="text-xs text-gray-400">暂无唤醒词，仅响应 @ 消息</span>
+                                <span className="text-xs text-gray-400">暂无自定义唤醒词</span>
                             )}
                         </div>
                     </div>
@@ -114,23 +141,22 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                 </div>
             </Section>
 
-            <Section
+            {!official && <Section
                 title="主动发言"
                 description="定期评估近期群聊，在置信度达到阈值后主动加入对话。"
-                action={<Activity className="h-4 w-4 text-emerald-600" />}
             >
                 <div className="space-y-4">
                     <Toggle
                         checked={Boolean(config.enableProactive)}
                         onChange={(value) => handleChange('enableProactive', value)}
                         label="启用主动发言"
-                        description="冷却时间和目标群限制仍会优先执行。"
+                        description="根据群聊活跃度调整参与节奏，保留目标群限制。"
                     />
 
                     {config.enableProactive && (
-                        <div className="grid gap-4 border-t border-gray-100 pt-4 md:grid-cols-2 xl:grid-cols-4">
+                        <div className="grid gap-4 border-t border-gray-100 pt-4 md:grid-cols-2">
                             <RangeField
-                                label="检查间隔"
+                                label="基础检查间隔"
                                 value={config.proactiveInterval}
                                 suffix=" 秒"
                                 min="60"
@@ -139,7 +165,7 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                                 onChange={(e) => handleChange('proactiveInterval', Number(e.target.value))}
                             />
                             <RangeField
-                                label="发言冷却"
+                                label="基础发言冷却"
                                 value={config.proactiveCooldown}
                                 suffix=" 秒"
                                 min="60"
@@ -175,7 +201,7 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                                 placeholder="输入群号后按 Enter 添加；留空表示全部群"
                                 className="ui-input"
                                 onKeyDown={(e) => {
-                                    if (e.key !== 'Enter') return;
+                                    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
                                     const value = e.currentTarget.value.trim();
                                     if (value && !targetGroups.includes(value)) {
                                         handleChange('proactiveTargetGroups', [...targetGroups, value]);
@@ -202,12 +228,13 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                 </div>
             </Section>
 
+            }
+            <details className="settings-disclosure"><summary>桌面感知<span>采样与隐私设置</span></summary>
             <Section
-                title="桌面感知"
+                title="采样与隐私"
                 description="在 Electron 桌宠模式下观察主显示器画面，并在合适的时机互动。"
                 action={(
                     <div className={`inline-flex min-h-7 items-center gap-2 rounded-md px-2.5 text-xs font-semibold ${desktopStatusClass}`} title={desktopAwareness?.detail || desktopStatusLabel}>
-                        <ScanEye className="h-3.5 w-3.5" />
                         <span>{desktopStatusLabel}</span>
                     </div>
                 )}
@@ -222,7 +249,7 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
 
                     {config.enableDesktopAwareness && (
                         <>
-                            <div className="grid gap-4 border-t border-gray-100 pt-4 md:grid-cols-2 xl:grid-cols-5">
+                            <div className="grid gap-4 border-t border-gray-100 pt-4 md:grid-cols-2">
                                 <RangeField
                                     label="分析间隔"
                                     value={config.desktopAwarenessInterval}
@@ -271,7 +298,6 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
 
                             <div className="field-group">
                                 <span className="flex items-center gap-2 field-label">
-                                    <ShieldCheck className="h-4 w-4 text-emerald-600" />
                                     隐私排除关键词
                                 </span>
                                 <input
@@ -279,7 +305,7 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                                     placeholder="输入前台应用或进程关键词后按 Enter"
                                     className="ui-input"
                                     onKeyDown={(event) => {
-                                        if (event.key !== 'Enter') return;
+                                        if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
                                         event.preventDefault();
                                         const value = event.currentTarget.value.trim();
                                         if (value && !excludedTerms.some(term => term.toLowerCase() === value.toLowerCase())) {
@@ -310,6 +336,7 @@ export default function ConnectTab({ config, handleChange, addKeyword, removeKey
                     )}
                 </div>
             </Section>
+            </details>
         </TabContent>
     );
 }

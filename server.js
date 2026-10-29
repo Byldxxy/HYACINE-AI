@@ -19,23 +19,26 @@ const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
 
 // --- 导入模块 ---
+const { officialIdentity } = require('./lib/qq-identity');
+const { createOfficialBot, challenge, verifyCallback } = require('./lib/qq-official');
+const { createOneBotClient } = require('./lib/onebot-client');
+const { timingSafeEqual } = require('node:crypto');
 const { maskApiKey } = require('./lib/utils');
+const { createAffect } = require('./lib/extensions/affect');
+const affect = createAffect();
+const { createStickerStore } = require('./lib/extensions/sticker-store');
 const { createConfigManager } = require('./lib/config');
 const { createMemoryManager } = require('./lib/memory');
 const { restartProactiveTimer, stopProactiveTimer } = require('./lib/proactive');
 const { createMessageHandler, sendToQQ } = require('./lib/message-handler');
 const { createConversationRuntime } = require('./lib/conversation-runtime');
+const { createTestConversation } = require('./lib/test-conversation');
 const qqTransport = require('./lib/qq-transport');
-const { generateImage, selectImageGenerationPrompt } = require('./lib/image-gen');
+const { generateImage } = require('./lib/image-gen');
 const { createDesktopAwarenessEngine, normalizeDesktopAwarenessConfig } = require('./lib/desktop-awareness');
 const { getRuntimePaths, prepareRuntimeData } = require('./lib/paths');
 const { hasParentIpc, onParentMessage, sendToParent } = require('./lib/parent-ipc');
 const { buildDiagnosticsReport } = require('./lib/diagnostics');
-const {
-    buildConversationMessages,
-    buildConversationSystemPrompt,
-    requestChatCompletion,
-} = require('./lib/chat-completion');
 const { version: APP_VERSION } = require('./package.json');
 
 // 路径必须在任何管理器初始化前准备好；配置、会话和用户图片都写入 data/，
@@ -77,7 +80,7 @@ app.use(cors({
         return callback(new Error(`CORS origin not allowed: ${origin}`));
     }
 }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb', verify(req, _res, body) { if (req.path === '/api/qqbot/webhook') req.rawBody = Buffer.from(body); } }));
 // 生产构建由后端托管；开发时 Vite 仍负责 5173 端口的热更新页面。
 app.use(express.static(DIST_PATH));
 app.use(express.static(PUBLIC_PATH));
@@ -150,6 +153,7 @@ onParentMessage((message) => {
 
 // --- 创建配置管理器 ---
 const configManager = createConfigManager({ configFile: CONFIG_FILE });
+const stickerStore = createStickerStore(path.join(runtimePaths.dataDir, 'stickers'));
 
 // --- 创建记忆管理器 ---
 const memory = createMemoryManager({ MEMORY_FILE, SUMMARY_FILE, PERSISTENT_FILE });
@@ -204,10 +208,22 @@ function syncDesktopAwarenessConfig() {
 // --- 创建消息处理器 ---
 let wssRef = null; // 将在后面赋值
 const conversationRuntime = createConversationRuntime();
+const testConversation = createTestConversation({
+    runtime: conversationRuntime,
+    memory,
+    getConfig: () => configManager.getConfig(),
+});
+function effectiveChatConfig() {
+    const config = configManager.getConfig();
+    if (config.qqProvider !== 'qqbot') return config;
+    return { ...config, botQQ: officialIdentity(config, 'bot'), masterQQ: config.qqBotMasterId ? officialIdentity(config, config.qqBotMasterId) : '' };
+}
 const handleQQMessage = createMessageHandler({
     runtime: conversationRuntime,
-    // 注入数据和副作用，使 message-handler 不需要导入 server.js，也便于单元测试替换。
-    getConfig: () => configManager.getConfig(),
+    stickerStore,
+    affect,
+    // Official OpenIDs must never be compared to personal QQ account numbers.
+    getConfig: effectiveChatConfig,
     memory,
     paths: { AVATAR_DIR },
     broadcastLog: (ws, type, msg) => wssRef && broadcastLog(wssRef, type, msg),
@@ -216,16 +232,47 @@ const handleQQMessage = createMessageHandler({
 });
 
 // --- 初始化系统 ---
+let systemReady = false;
 async function initSystem() {
     await configManager.loadConfig();
+    await stickerStore.load();
+    const oldConfig = configManager.getConfig();
+    if (oldConfig.stickers?.length) {
+        const failed = [];
+        for (const item of oldConfig.stickers) {
+            try { await stickerStore.add({ ...item, source: 'migration' }); }
+            catch (error) { failed.push(item); console.error('旧表情迁移未完成:', error.message); }
+        }
+        await configManager.saveConfig({ ...oldConfig, stickers: failed });
+    }
     await memory.loadAll();
     syncDesktopAwarenessConfig();
 }
-const initPromise = initSystem(); // 初始化完成后在 wss 就绪后手动启动主动发言
+const initPromise = initSystem().then(() => { systemReady = true; });
+// Keep the original promise rejected so consumers cannot mistake failed initialization for readiness.
+initPromise.catch(error => console.error('系统初始化失败:', error.message));
 
 // ==========================================
 // 🔌 API 接口
 // ==========================================
+
+app.get('/api/status', (_req, res) => {
+    const config = configManager.getConfig();
+    const connections = napcatConnections.filter(connection => connection.readyState === WebSocket.OPEN).length;
+    res.set('Cache-Control', 'no-store').json({
+        ready: systemReady,
+        qq: config.qqProvider === 'qqbot' ? officialBot.status() : { provider: config.qqProvider || 'napcat', connected: connections > 0, connections, state: connections ? 'connected' : onebotState },
+        model: {
+            configured: [config.apiEndpoint, config.apiKey, config.modelName]
+                .every(value => typeof value === 'string' && value.trim().length > 0),
+        },
+        desktop: {
+            available: desktopPetAvailable,
+            visible: desktopPetAvailable && desktopPetVisible,
+        },
+        version: APP_VERSION,
+    });
+});
 
 // 图片文件流服务 (EXE 模式适配)
 app.get('/api/avatars/:filename', (req, res) => {
@@ -256,12 +303,31 @@ app.get('/api/avatars', async (req, res) => {
     }
 });
 
+// Separate media management: per-item mutations avoid overwriting concurrent group teaching.
+app.get('/api/extensions/affect', (_req, res) => res.json(affect.status()));
+app.delete('/api/extensions/affect', (_req, res) => { affect.clear(); res.json({ success: true }); });
+app.get('/api/stickers', async (_req, res) => {
+    try { await initPromise; res.json(stickerStore.list()); } catch (error) { sendManagementError(res, error); }
+});
+app.get('/api/stickers/:id/image', async (req, res) => {
+    try { await initPromise; const image = await stickerStore.image(req.params.id); res.set('Cache-Control', 'no-store').type(image.mime).send(image.bytes); } catch { res.sendStatus(404); }
+});
+app.post('/api/stickers', async (req, res) => {
+    try { await initPromise; const item = await stickerStore.add({ ...req.body, source: 'manual' }); res.json({ success: true, item }); } catch (error) { sendManagementError(res, error); }
+});
+app.patch('/api/stickers/:id', async (req, res) => {
+    try { await initPromise; await stickerStore.update(req.params.id, req.body); res.json({ success: true }); } catch (error) { sendManagementError(res, error); }
+});
+app.delete('/api/stickers/:id', async (req, res) => {
+    try { await initPromise; await stickerStore.remove(req.params.id); res.json({ success: true }); } catch (error) { sendManagementError(res, error); }
+});
 // 配置读取 (脱敏)
 app.get('/api/config', (req, res) => {
     const config = configManager.getConfig();
     const safeConfig = { ...config };
     safeConfig.httpPort = String(API_PORT);
     safeConfig.wsUrl = `ws://${BIND_HOST}:${API_PORT}`;
+    for (const field of ['onebotToken', 'snowlumaToken', 'qqBotSecret']) if (safeConfig[field]) safeConfig[field] = '***';
     if (safeConfig.apiKey) {
         safeConfig.apiKey = maskApiKey(safeConfig.apiKey);
     }
@@ -273,6 +339,7 @@ app.post('/api/config', async (req, res) => {
     try {
         const incoming = req.body;
         await configManager.saveConfig(incoming);
+        syncQQChannels();
         if (wssRef) broadcastLog(wssRef, 'system', '配置已更新');
         enhancedRestartProactiveTimer();
         syncDesktopAwarenessConfig();
@@ -435,74 +502,24 @@ app.delete('/api/persistent-memory', async (req, res) => {
 
 // --- 测试对话 API ---
 app.post('/api/test-chat', async (req, res) => {
-    const { message, isMaster: testIsMaster, scenario } = req.body;
+    const { message } = req.body;
     if (!message || !configManager.getConfig().apiKey) {
         return res.status(400).json({ error: '缺少消息或 API Key' });
     }
     try {
-        const config = configManager.getConfig();
-        const sessions = memory.getSessions();
-        const summaries = memory.getSummaries();
-        const persistentMem = memory.getPersistentMemory();
-        const testSessionId = `test_${scenario || 'default'}`;
-        if (!sessions[testSessionId]) sessions[testSessionId] = [];
-
-        const identityPrefix = testIsMaster
-            ? `[发送者: 主人/Master (测试用户)] `
-            : `[发送者: 测试用户(000000)] `;
-
-        sessions[testSessionId].push({ role: "user", content: identityPrefix + message });
-
-        const maxMem = config.shortMem || 10;
-        if (sessions[testSessionId].length > maxMem * 2) {
-            sessions[testSessionId] = sessions[testSessionId].slice(-(maxMem * 2));
-        }
-
-        const systemPrompt = buildConversationSystemPrompt(config, {
-            senderId: '000000',
-            isMaster: Boolean(testIsMaster),
-        });
-        const messagesToSend = buildConversationMessages({
-            systemPrompt,
-            summary: summaries[testSessionId],
-            persistentMemory: persistentMem,
-            sessionId: testSessionId,
-            includePersistentMemory: config.persistMem,
-            sessionMessages: sessions[testSessionId],
-        });
-        const completion = await requestChatCompletion(config, messagesToSend);
-
-        const aiReply = completion.choices[0]?.message?.content || "(AI 未返回内容)";
-        const imgCmdMatch = aiReply.match(/\[CMD:IMAGE_GEN\]\s*(.*)/);
-        if (imgCmdMatch) {
-            const imagePrompt = selectImageGenerationPrompt(config, message, imgCmdMatch[1]);
-            const reply = config.optimizeImgPrompt === true
-                ? aiReply
-                : `[CMD:IMAGE_GEN] ${imagePrompt}`;
-            sessions[testSessionId].push({
-                role: "assistant",
-                content: config.optimizeImgPrompt === true
-                    ? aiReply
-                    : '[已按上一条用户原始要求生成图片]',
-            });
-            await memory.saveMemoryToDisk();
-            return res.json({ reply, isImage: true, imagePrompt });
-        }
-        sessions[testSessionId].push({ role: "assistant", content: aiReply });
-        await memory.saveMemoryToDisk();
-        res.json({ reply: aiReply, isImage: false });
+        res.json(await testConversation.chat(req.body));
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(error.code === 'conversation-reset' ? 409 : 500).json({ error: error.message });
     }
 });
 
 app.delete('/api/test-chat/:scenario', async (req, res) => {
-    const sessions = memory.getSessions();
-    const summaries = memory.getSummaries();
-    delete sessions[`test_${req.params.scenario}`];
-    delete summaries[`test_${req.params.scenario}`];
-    await memory.saveMemoryToDisk();
-    res.json({ success: true });
+    try {
+        await testConversation.reset(req.params.scenario);
+        res.json({ success: true });
+    } catch (error) {
+        sendManagementError(res, error);
+    }
 });
 
 // --- 测试生图 API ---
@@ -547,43 +564,100 @@ const server = app.listen(API_PORT, BIND_HOST, () => {
     initPromise.then(() => {
         console.log('✅ 配置与记忆初始化完成');
         sendToParent({ type: 'server-ready', port: API_PORT });
-    });
+    }, () => {});
 });
 
 // --- WebSocket 服务 ---
 const wss = new WebSocketServer({ server });
 wssRef = wss;
 
-wss.on('connection', (ws) => {
+const officialBot = createOfficialBot({ getConfig: () => configManager.getConfig() });
+let onebotState = 'disconnected', channelSignature = '';
+const snowlumaClient = createOneBotClient({
+    attach: ws => attachOneBot(ws, 'snowluma'),
+    onState: state => { onebotState = state; },
+});
+function activeProvider() { return configManager.getConfig().qqProvider || 'napcat'; }
+function syncQQChannels() {
+    const c = configManager.getConfig();
+    const signature = JSON.stringify([activeProvider(), c.botQQ, c.onebotToken, c.snowlumaUrl, c.snowlumaToken, c.qqBotAppId, c.qqBotSecret, c.qqBotSandbox, c.qqBotMasterId]);
+    if (signature === channelSignature) return;
+    channelSignature = signature;
+    snowlumaClient.stop(); officialBot.reset(); conversationRuntime.reset();
+    for (const ws of napcatConnections) { qqTransport.disconnect(ws); ws.close(1000, 'Channel configuration changed'); }
+    napcatConnections = []; onebotState = 'disconnected';
+    if (activeProvider() === 'snowluma') {
+        if (c.snowlumaUrl) snowlumaClient.start({ url: c.snowlumaUrl, token: c.snowlumaToken });
+        else onebotState = 'unconfigured';
+    }
+}
+function tokenMatches(actual, expected) {
+    const a = Buffer.from(actual || ''), b = Buffer.from(expected || '');
+    return a.length === b.length && timingSafeEqual(a, b);
+}
+function attachOneBot(ws, provider, request) {
     ws.on('close', () => {
         qqTransport.disconnect(ws);
         if (napcatConnections.includes(ws)) {
             napcatConnections = napcatConnections.filter(c => c !== ws);
-            broadcastLog(wss, 'system', 'NapCat 已断开');
+            broadcastLog(wss, 'system', `${provider === 'snowluma' ? 'SnowLuma' : 'NapCat'} 已断开`);
         }
     });
-    ws.on('error', error => { broadcastLog(wss, 'error', `WebSocket 错误: ${error.message}`); });
+    ws.on('error', () => { broadcastLog(wss, 'error', `${provider === 'snowluma' ? 'SnowLuma' : 'OneBot'} 连接异常，请检查地址和访问令牌`); });
     ws.on('message', async message => {
         try {
             const raw = message.toString();
-            if (raw === 'iam_frontend' && !ws.selfId) { ws.isFrontend = true; return; }
-            if (raw === 'iam_pet' && !ws.selfId) { ws.isPet = true; return; }
+            if (provider === 'napcat' && raw === 'iam_frontend' && !ws.selfId) { ws.isFrontend = true; return; }
+            if (provider === 'napcat' && raw === 'iam_pet' && !ws.selfId) { ws.isPet = true; return; }
             if (ws.isFrontend || ws.isPet) return;
+            await initPromise;
+            if (ws.readyState !== WebSocket.OPEN || activeProvider() !== provider) return;
+            const config = configManager.getConfig();
+            if (provider === 'napcat' && config.onebotToken) {
+                const bearer = request?.headers.authorization?.replace(/^Bearer /i, '');
+                if (!tokenMatches(bearer, config.onebotToken)) { ws.close(1008, 'Invalid access token'); return; }
+            }
             let event;
             try { event = JSON.parse(raw); } catch { return; }
             if (!event || typeof event !== 'object') return;
             if (qqTransport.handleResponse(ws, event)) return;
+            if (provider === 'snowluma' && event.echo === 'hyacine:login' && event.status === 'ok' && Number(event.retcode) === 0) event = { post_type: 'meta_event', self_id: event.data?.user_id };
             if (!['message', 'message_sent', 'meta_event', 'notice', 'request'].includes(event.post_type)) return;
-            await initPromise;
-            if (ws.readyState !== WebSocket.OPEN) return;
-            const config = configManager.getConfig(), selfId = String(event.self_id || ws.selfId || config.botQQ || '');
+            const selfId = String(event.self_id || ws.selfId || config.botQQ || '');
             if (!/^\d+$/.test(selfId) || (config.botQQ && selfId !== String(config.botQQ)) || (ws.selfId && ws.selfId !== selfId)) return;
             ws.selfId = selfId;
-            if (!napcatConnections.includes(ws)) { napcatConnections.push(ws); broadcastLog(wss, 'system', 'NapCat 已连接'); }
+            if ((event.notice_type === 'bot_status' && event.sub_type === 'offline') || event.notice_type === 'bot_offline' || (event.meta_event_type === 'heartbeat' && event.status?.online === false)) {
+                napcatConnections = napcatConnections.filter(connection => connection !== ws);
+                onebotState = 'account-offline';
+                qqTransport.disconnect(ws);
+                return;
+            }
+            if (!napcatConnections.includes(ws)) { napcatConnections.push(ws); broadcastLog(wss, 'system', `${provider === 'snowluma' ? 'SnowLuma' : 'NapCat'} 已连接`); }
+            // Only the verified official webhook adapter may assign the official identity namespace.
+            delete event.channel;
             if (event.post_type === 'message') await handleQQMessage(ws, event);
         } catch (error) { broadcastLog(wss, 'error', `QQ 消息处理失败: ${error.message}`); }
     });
+}
+wss.on('connection', (ws, request) => attachOneBot(ws, 'napcat', request));
+
+app.post('/api/qqbot/webhook', async (req, res) => {
+    try {
+        await initPromise;
+        const config = configManager.getConfig();
+        if (activeProvider() !== 'qqbot' || !config.qqBotAppId || !config.qqBotSecret) return res.sendStatus(503);
+        if (req.get('X-Bot-Appid') !== config.qqBotAppId) return res.sendStatus(401);
+        if (req.body?.op === 13) {
+            // Validation challenges are unsigned by the platform and do not establish event readiness.
+            return res.json(challenge(config.qqBotSecret, req.body.d));
+        }
+        if (!verifyCallback(config.qqBotSecret, req.rawBody, req.get('X-Signature-Timestamp'), req.get('X-Signature-Ed25519'))) return res.sendStatus(401);
+        const accepted = officialBot.accept(req.body);
+        res.json({ op: 12 });
+        if (accepted) void handleQQMessage(accepted.transport, accepted.event).catch(() => broadcastLog(wss, 'error', 'QQ 官方消息处理失败'));
+    } catch { if (!res.headersSent) res.sendStatus(400); }
 });
+initPromise.then(syncQQChannels, () => {});
 
 // --- 主动发言定时检查 (使用依赖注入) ---
 const proactiveCheckDeps = () => ({
@@ -605,7 +679,7 @@ function enhancedRestartProactiveTimer() {
 }
 
 // 配置与历史读取完成后才启动，防止初始化期间使用默认配置
-initPromise.then(() => enhancedRestartProactiveTimer());
+initPromise.then(() => enhancedRestartProactiveTimer(), () => {});
 
 let shuttingDown = false;
 function shutdown(signal) {
@@ -613,6 +687,7 @@ function shutdown(signal) {
     shuttingDown = true;
     console.log(`收到 ${signal}，正在关闭后端...`);
     stopProactiveTimer();
+    snowlumaClient.stop(); officialBot.reset();
     conversationRuntime.reset();
     for (const connection of napcatConnections) qqTransport.disconnect(connection);
     wss.close();

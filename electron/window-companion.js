@@ -1,6 +1,9 @@
 const { WindowWorld, visibleWindows } = require('./window-world');
 const { readWindowList } = require('./window-provider');
 
+// Electron's native Point conversion requires signed 32-bit integer coordinates.
+const validCoordinate = value => Number.isFinite(value) && Math.round(value) >= -2147483648 && Math.round(value) <= 2147483647;
+
 function createWindowCompanion({ getWindow, screen, onStatus = () => {}, onEnabledChange = () => {} }) {
     const world = new WindowWorld();
     let metrics = { anchorX: 125, anchorY: 380, radius: 32, height: 300 };
@@ -46,6 +49,23 @@ function createWindowCompanion({ getWindow, screen, onStatus = () => {}, onEnabl
             if (failures >= 2) world.setWindows([]);
         } finally { scanning = false; }
     }
+    function recoverPosition() {
+        world.release();
+        syncPosition();
+        lastError = 'position-recovered';
+    }
+    function moveWindow(win, x, y) {
+        if (!validCoordinate(x) || !validCoordinate(y)) { recoverPosition(); return; }
+        try {
+            win.setPosition(Math.round(x), Math.round(y), false);
+        } catch (error) {
+            if (win.isDestroyed()) return;
+            // A native move must not escape the interval as an uncaught exception.
+            recoverPosition();
+            lastError = 'window-move-unavailable';
+            console.warn('[WindowCompanion] Window movement failed:', error.message);
+        }
+    }
     function step() {
         const time = Date.now();
         const dt = Math.min(0.05, (time - lastTime) / 1000); lastTime = time;
@@ -54,20 +74,21 @@ function createWindowCompanion({ getWindow, screen, onStatus = () => {}, onEnabl
         // Hover may stop a walk, but should never suspend gravity in mid-air.
         const pointerOnly = uiPauses.size > 0 && [...uiPauses.values()].every(mode => mode === 'pointer');
         if (resizing || (uiPauses.size > 0 && !(pointerOnly && world.state === 'falling'))) { publish(); return; }
+        if (!validCoordinate(world.actor.x) || !validCoordinate(world.actor.y)) recoverPosition();
         world.setArea(screen.getDisplayNearestPoint({ x: Math.round(world.actor.x), y: Math.round(world.actor.y) }).workArea);
         if (time >= nextScan) { nextScan = time + (process.platform === 'win32' ? 1500 : 600); void scan(); }
         const state = world.tick(dt);
         if (!world.dragging) {
             const b = win.getBounds();
             const x = Math.round(state.x - metrics.anchorX), y = Math.round(state.y - metrics.anchorY);
-            if (b.x !== x || b.y !== y) win.setPosition(x, y, false);
+            if (b.x !== x || b.y !== y) moveWindow(win, x, y);
         }
         publish();
     }
     function updatePause() { world.paused = uiPauses.size > 0 || behaviorBusy; publish(); }
     function placeActor() {
         const win = getWindow();
-        if (win && !win.isDestroyed()) win.setPosition(Math.round(world.actor.x - metrics.anchorX), Math.round(world.actor.y - metrics.anchorY), false);
+        if (win && !win.isDestroyed()) moveWindow(win, world.actor.x - metrics.anchorX, world.actor.y - metrics.anchorY);
     }
     return {
         start() { if (!timer) { timer = setInterval(step, 33); timer.unref?.(); } },
