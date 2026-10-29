@@ -32,7 +32,7 @@ src/assets/atelier/*
 .env
 
 # Runtime data and local user assets
-data/
+/data/
 
 # Editor directories and files
 .vscode/*
