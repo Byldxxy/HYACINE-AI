@@ -159,10 +159,13 @@ class WindowWorld {
                     this.setWindows(this.windows);
                 }
             }
+        } else if (this.state === 'landing') {
+            this.rest = Math.max(0, this.rest - dt);
+            if (this.rest === 0) this.state = 'idle';
         } else if (this.paused) this.state = 'idle';
         else if (this.rest > 0) {
             this.rest -= dt;
-            if (this.state !== 'landing') this.state = 'idle';
+            this.state = 'idle';
         } else {
             this.state = 'walking';
             const w = this.windows.find(w => w.id === this.attachment?.id)?.bounds;
@@ -171,7 +174,10 @@ class WindowWorld {
             p.x += this.direction * 42 * dt;
             if (p.x <= min || p.x >= max) {
                 p.x = clamp(p.x, min, max); this.direction *= -1; this.rest = 2 + this.random() * 4;
-            } else if (this.random() < dt / 14) this.rest = 3 + this.random() * 5;
+            } else if (this.random() < dt / 14) {
+                // Leave room for an occasional stretch even when roaming is enabled.
+                this.rest = this.random() < 0.2 ? 36 + this.random() * 12 : 3 + this.random() * 5;
+            }
             if (this.attachment && w) this.attachment.offset = p.x - w.x;
             // On the desktop floor, catch a reachable side of a window and climb it.
             if (!w) {

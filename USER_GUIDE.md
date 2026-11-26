@@ -1,4 +1,4 @@
-# HYACINE-AI 1.3.0 零基础使用手册
+# HYACINE-AI 1.4.0 零基础使用手册
 
 这份手册面向第一次接触 Git、Node.js、命令行和 Electron 的用户。按照顺序操作即可，不需要先理解项目源码。
 
@@ -94,10 +94,10 @@ git clone https://github.com/Byldxxy/HYACINE-AI.git
 cd HYACINE-AI
 ```
 
-如果要使用经过标记的 `1.3.0` 版本，而不是随时可能更新的开发分支，再执行：
+如果要使用经过标记的 `1.4.0` 版本，而不是随时可能更新的开发分支，再执行：
 
 ```bash
-git checkout v1.3.0
+git checkout v1.4.0
 ```
 
 检查当前版本：
@@ -106,7 +106,7 @@ git checkout v1.3.0
 git status
 ```
 
-看到 `On branch main` 表示正在使用最新主分支；看到 `HEAD detached at v1.3.0` 不是错误，表示正在使用固定的 1.3.0 版本。
+看到 `On branch main` 表示正在使用最新主分支；看到 `HEAD detached at v1.4.0` 不是错误，表示正在使用固定的 1.4.0 版本。
 
 ### 3.3 不使用 Git 的下载方式
 
@@ -280,11 +280,12 @@ WebUI 默认进入“工作台”，导航入口如下：
 | 页面 | 用途 |
 | --- | --- |
 | 工作台 | 查看后端、QQ 与模型配置状态，进入设置并查看最近活动 |
-| 对话 | 使用已保存配置测试角色回复，不向真实 QQ 发送消息 |
+| 对话 | 测试角色回复，或用多人片段回放群里的接话与表情选择 |
 | 记忆 | 管理长期记忆、会话记录、会话摘要与记忆策略 |
 | 人设 | 编辑角色名称、提示词、身份关系和风堇群聊预设 |
 | 模型 | 配置文本、视觉与生图模型，管理角色参考图并测试生图 |
-| 连接 | 配置 NapCat、触发规则、主动参与和桌面感知 |
+| 连接 | 选择 QQ 渠道，配置触发规则、主动参与和桌面感知 |
+| 扩展 | 管理表情素材与教学权限，配置短语音转写、B 站解析和情绪 |
 
 顶部“后端在线”只表示管理服务可访问，QQ 是否连接需看独立的 QQ 状态；“模型已配置”表示必要字段已填写，实际可用性通过“对话”页验证。运行日志从导航底部打开。
 
@@ -329,6 +330,8 @@ ws://127.0.0.1:3001
 
 长期记忆、会话记录、会话摘要有独立保存入口，`Cmd/Ctrl + S` 不代替这些操作。会话草稿按会话分别保留，切换会话不会把内容写到另一会话；刷新长期记忆列表时也不会覆盖尚未保存的修改。离开页面前，浏览器会对未保存的配置或记忆发出提示。
 
+多个窗口修改同一字段或同一条记忆时，页面会显示冲突。核对两个版本后，选择保留草稿或采用服务器版本。要查看某个群的模型用量，可打开「运行日志 → 调用统计」，选择日期和群。服务商缺报的用量单独标记。
+
 “对话”页使用服务端已保存的人设和模型配置；修改后先保存再测试。选择主人或普通用户身份，输入消息后发送；中文输入法确认候选字时不会误发消息。清空会话时取消旧请求，只有后端确认清空后才移除页面记录。清空失败时保留原记录并显示错误。
 
 ### 6.5 配置保存在哪里
@@ -338,13 +341,16 @@ ws://127.0.0.1:3001
 ```text
 data/
 ├── bot-config.json
-├── bot-sessions.json
-├── bot-summaries.json
+├── bot-sessions.json.d/
+├── usage-metrics.json
 ├── bot-persistent-memory.json
+├── stickers/
 └── avatars/
 ```
 
 安装后的 Electron 应用使用操作系统的用户数据目录，避免向安装目录写文件。不要手动把 `data/` 上传到 GitHub，其中可能包含密钥、角色预设和聊天内容。
+
+旧版会话与摘要在首次启动时导入。手动备份时请先退出后端，再复制整个数据目录，包括 `bot-sessions.json.d/` 下的索引和会话文件。
 
 ## 7. 运行项目自检
 
@@ -368,12 +374,12 @@ npm run check:release
 
 本节需要在 Windows 10/11 x64 环境完成。推荐使用 PowerShell，并确保 Git、Node.js 22.12+ 已安装。
 
-### 8.1 获取干净的 1.3.0 源码
+### 8.1 获取干净的 1.4.0 源码
 
 ```powershell
 git clone https://github.com/Byldxxy/HYACINE-AI.git
 cd HYACINE-AI
-git checkout v1.3.0
+git checkout v1.4.0
 npm ci
 ```
 
@@ -382,7 +388,7 @@ npm ci
 ```powershell
 git status
 git pull
-git checkout v1.3.0
+git checkout v1.4.0
 npm ci
 ```
 
@@ -440,14 +446,14 @@ npm run dist:win
 第一次打包可能需要下载 Electron Builder 使用的 Windows 工具，时间会比普通构建长。完成后安装程序位于：
 
 ```text
-release/HYACINE-AI-Setup-1.3.0-x64.exe
+release/HYACINE-AI-Setup-1.4.0-x64.exe
 ```
 
 `release/` 已被 Git 忽略，不会因为普通 `git add .` 而上传到源码仓库。
 
 ### 8.5 安装和验证
 
-1. 在测试机运行 `HYACINE-AI-Setup-1.3.0-x64.exe`。
+1. 在测试机运行 `HYACINE-AI-Setup-1.4.0-x64.exe`。
 2. 选择安装目录并完成安装。
 3. 首次启动应看到桌宠或模型缺失提示，取决于安装包是否携带本地授权素材。
 4. 打开管理面板，确认 API Endpoint、API Key 和角色预设为空。

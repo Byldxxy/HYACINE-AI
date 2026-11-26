@@ -3,6 +3,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowDown, Check, Copy, Flower2, MessageCircle } from 'lucide-react';
 import { Button, IconButton } from '../UIComponents';
 import PinkSelect from '../PinkSelect';
+import GroupReplay from './GroupReplay';
 import '../../styles/conversation.css';
 
 const IDENTITIES = [{ value: 'master', label: '主人' }, { value: 'stranger', label: '普通用户' }];
@@ -17,6 +18,7 @@ export default function TestTab({
     const copyTimer = useRef(null);
     const [following, setFollowing] = useState(true);
     const [copyState, setCopyState] = useState(null);
+    const [mode, setMode] = useState('single');
     const name = charName?.trim() || '风堇';
     const busy = Boolean(testLoading || clearing);
 
@@ -58,9 +60,13 @@ export default function TestTab({
         <section className="conversation-workspace" aria-label="对话测试">
             <header className="conversation-heading">
                 <div className="conversation-title"><MessageCircle aria-hidden="true" /><h1>对话测试</h1></div>
-                <Button size="sm" variant="ghost" disabled={busy} onClick={clearTestChat}>
+                <div className="conversation-modes" role="group" aria-label="测试模式">
+                    <button type="button" aria-pressed={mode === 'single'} onClick={() => setMode('single')}>单人对话</button>
+                    <button type="button" aria-pressed={mode === 'group'} onClick={() => setMode('group')}>多人回放</button>
+                </div>
+                {mode === 'single' && <Button size="sm" variant="ghost" disabled={busy} onClick={clearTestChat}>
                     {clearing ? '清空中' : '清空'}
-                </Button>
+                </Button>}
             </header>
             {configDirty && (
                 <div className="conversation-config-note" role="status">
@@ -68,7 +74,7 @@ export default function TestTab({
                     {onSaveConfig && <button type="button" onClick={onSaveConfig}>保存配置</button>}
                 </div>
             )}
-            <div className="conversation-card">
+            {mode === 'group' ? <GroupReplay /> : <div className="conversation-card">
                 <div className="conversation-toolbar">
                     <div className="conversation-identity"><span className="conversation-presence" /><strong>{name}</strong><span className="conversation-saved-label">已保存配置</span></div>
                     <fieldset className="conversation-identity-select" disabled={busy}>
@@ -119,7 +125,7 @@ export default function TestTab({
                         }} />
                     <div className="conversation-composer-footer"><span>Enter 发送 · Shift + Enter 换行</span><Button type="submit" variant="primary" size="sm" disabled={busy || !testInput.trim()}>发送</Button></div>
                 </form>
-            </div>
+            </div>}
         </section>
     );
 }

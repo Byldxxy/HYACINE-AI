@@ -15,7 +15,6 @@ const DEFAULT_PRIORITY = {
 };
 
 const DEFAULT_FADE_SECONDS = 0.4;
-const MIN_TRANSITION_SECONDS = 1 / 60;
 
 function asNonNegativeSeconds(value, fallback) {
     const seconds = Number(value);
@@ -31,7 +30,7 @@ export class MotionController {
         this.onFinished = onFinished;
         this.current = null;
         this.lastPlayedAt = new Map();
-        this.transitions = [];
+        this.blend = null;
         const helperObjects = helper.objects.get(mesh);
         this.mixer = helperObjects?.mixer || null;
 
@@ -59,7 +58,7 @@ export class MotionController {
 
         const activeActions = new Set([
             this.current?.action,
-            ...this.transitions.map(item => item.action),
+            ...(this.blend?.sources || []).map(item => item.action),
         ].filter(Boolean));
         const activeTrackNames = new Set();
         activeActions.forEach(action => {
@@ -85,50 +84,32 @@ export class MotionController {
         helperObjects.looped = false;
     }
 
-    queueTransition(action, duration) {
-        if (!action) return;
-        // AnimationAction 的淡入淡出也以 mixer.time 为时钟；使用同一时间轴才能保证
-        // action 只在 Three.js 完成权重插值后停止，不受渲染帧累计误差影响。
-        const endTime = this.mixer.time + Math.max(MIN_TRANSITION_SECONDS, duration);
-        const existing = this.transitions.find(item => item.action === action);
-        if (existing) {
-            existing.endTime = Math.max(existing.endTime, endTime);
-            return;
-        }
-        this.transitions.push({ action, endTime });
-    }
-
-    cancelQueuedTransition(action) {
-        // AnimationMixer 会为同一 clip 复用 AnimationAction。旧动作尚在淡出时再次播放，
-        // 需要取消其待停止任务，否则新一轮动作会在过渡结束时被误停。
-        this.transitions = this.transitions.filter(item => item.action !== action);
-    }
-
     returnToIdle() {
         if (!this.has('idle')) return false;
         return this.play('idle', { force: true, loop: true });
     }
 
-    beforeAnimationUpdate() {
-        // 必须在 MMDAnimationHelper 更新之前停止旧 action。这样本帧会先恢复舞蹈独占
-        // 骨骼，再由 idle、IK、Grant 和物理完整求解，不会把舞蹈末帧重新写回缓存。
-        const stoppedActions = [];
-        const completed = this.transitions.filter(item => item.endTime <= this.mixer.time);
-        this.transitions = this.transitions.filter(item => item.endTime > this.mixer.time);
-        completed.forEach(item => {
-            if (item.action !== this.current?.action) {
-                item.action.stop();
-                stoppedActions.push(item.action);
-            }
-        });
-        if (stoppedActions.length === 0) return;
+    beforeAnimationUpdate(delta = 0) {
+        const blend = this.blend;
+        if (!blend) return;
 
-        // 最后一项旧动作退出时，明确结束当前 action 的淡入并锁定完整权重。本帧随后
-        // 执行 mixer.update，确保腿部和 IK 目标严格来自 idle，而不是残余混合结果。
-        if (this.transitions.length === 0 && this.current?.action) {
-            this.current.action.setEffectiveWeight(1);
+        // Sample the same instant that the upcoming mixer.update(delta) will use.
+        const nextTime = this.mixer.time + delta * (this.mixer.timeScale ?? 1);
+        const t = blend.duration > 0 ? THREE.MathUtils.clamp((nextTime - blend.startTime) / blend.duration, 0, 1) : 1;
+        if (t < 1) {
+            const eased = t * t * (3 - 2 * t);
+            for (const { action, weight } of blend.sources) {
+                action.setEffectiveWeight(weight * (1 - eased));
+            }
+            this.current.action.setEffectiveWeight(blend.targetWeight + (1 - blend.targetWeight) * eased);
+            return;
         }
-        this.syncStoppedBoneBindings(stoppedActions);
+
+        // Stop before the helper restores its IK/physics baseline for this frame.
+        this.blend = null;
+        this.current.action.setEffectiveWeight(1);
+        for (const { action } of blend.sources) action.stop();
+        this.syncStoppedBoneBindings(blend.sources.map(source => source.action));
     }
 
     afterAnimationUpdate(delta = 0) {
@@ -175,23 +156,31 @@ export class MotionController {
         const outgoing = this.current;
         const fadeOut = asNonNegativeSeconds(outgoing?.definition?.fadeOut, DEFAULT_FADE_SECONDS);
         const fadeIn = asNonNegativeSeconds(definition.fadeIn, DEFAULT_FADE_SECONDS);
-        if (outgoing?.action) {
-            if (fadeOut > 0) outgoing.action.fadeOut(fadeOut);
-            else outgoing.action.setEffectiveWeight(0);
-            this.queueTransition(outgoing.action, Math.max(fadeOut, fadeIn));
-        }
-
-        // Three.js 为同一 clip 缓存 action；先取消旧的停止任务，再从首帧淡入。
         const action = this.mixer.clipAction(motion.clip);
-        this.cancelQueuedTransition(action);
         const loop = options.loop ?? definition.loop ?? name === 'idle';
-        action.reset();
+
+        // Re-target the whole visible mixture, including clips still fading out.
+        // Restarting a built-in Three.js fade would bring its source back to full weight.
+        const visible = (this.blend?.sources || []).map(source => source.action);
+        if (outgoing) visible.push(outgoing.action);
+        const returning = visible.includes(action);
+        const sources = visible.filter(source => source !== action)
+            .map(source => ({ action: source, weight: source.getEffectiveWeight() }));
+        const targetWeight = sources.length === 0 ? 1 : returning ? action.getEffectiveWeight() : 0;
+        this.blend = sources.length ? {
+            startTime: this.mixer.time,
+            duration: Math.max(fadeIn, fadeOut),
+            sources,
+            targetWeight,
+        } : null;
+
+        // A loop reselected while its previous pose is visible keeps its gait or breath phase.
+        if (!returning || (!loop && action.paused)) action.reset();
         action.enabled = true;
         action.clampWhenFinished = !loop;
         action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
-        action.setEffectiveWeight(1);
+        action.setEffectiveWeight(targetWeight);
         action.setEffectiveTimeScale(Number(definition.timeScale) || 1);
-        if (fadeIn > 0) action.fadeIn(fadeIn);
         action.play();
 
         const duration = asNonNegativeSeconds(options.duration, 0);
@@ -208,7 +197,7 @@ export class MotionController {
     }
 
     dispose() {
-        this.transitions = [];
+        this.blend = null;
         if (this.mixer) {
             this.mixer.removeEventListener('finished', this.handleFinished);
             this.mixer.stopAllAction();

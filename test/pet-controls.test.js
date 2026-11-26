@@ -58,12 +58,15 @@ test('pointer hover allows a fall to finish, then keeps the landed pet still', (
     const { service: s, bounds, tick } = setup();
     s.setUiPaused(true, 'renderer', 'pointer');
     const y = bounds.y;
-    for (let i = 0; i < 30; i++) tick();
+    for (let i = 0; i < 20; i++) tick();
     assert.ok(bounds.y > y);
     assert.equal(s.getState().state, 'landing');
     const landed = { ...bounds };
     for (let i = 0; i < 60; i++) tick();
-    assert.deepEqual(bounds, landed); s.stop();
+    assert.deepEqual(bounds, landed);
+    assert.equal(s.getState().state, 'idle');
+    assert.equal(s.getState().interactionPaused, true);
+    s.stop();
 });
 
 

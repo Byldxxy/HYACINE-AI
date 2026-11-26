@@ -35,6 +35,21 @@ test('chat pauses climbing without changing the grip position', () => {
     assert.equal(w.actor.y, 650); assert.equal(w.state, 'climbing');
     w.paused = false; advance(w, 1); assert.ok(w.actor.y < 650);
 });
+test('roaming occasionally rests long enough to stretch and then walks again', () => {
+    const w = world(500, 400);
+    w.setEnabled(true);
+    w.rest = 0;
+    w.random = () => 0;
+    w.tick(1 / 30);
+    w.random = () => 0.5;
+    const x = w.actor.x;
+    advance(w, 30);
+    assert.equal(w.state, 'idle');
+    assert.equal(w.actor.x, x);
+    advance(w, 7);
+    assert.equal(w.state, 'walking');
+    assert.ok(w.actor.x < x);
+});
 test('closing or minimizing the support window falls to the work-area floor', () => {
     const w = world(500, 410); w.setEnabled(true); w.setWindows([]); advance(w, 3);
     assert.equal(w.attachment, null); assert.equal(w.actor.y, 900);

@@ -23,6 +23,7 @@ import PetOverlay from './ui/PetOverlay';
 import { PetBehavior } from './runtime/PetBehavior';
 import { HandDragController } from './runtime/HandDragController';
 import { createCompanionMotions } from './runtime/companionMotions';
+import { WindowMotionPhase } from './runtime/WindowMotionPhase';
 
 const BASE_WIDTH = 250;
 const BASE_HEIGHT = 400;
@@ -31,7 +32,13 @@ const MAX_SPEECH_HEADROOM = 500;
 const MAX_RENDERED_SPEECH_LENGTH = 1000;
 const PET_SCALE_KEY = 'hyacine-pet-scale';
 const ROAMING_KEY = 'hyacine-window-roaming';
-const STATE_LABELS = { mantling: '翻越', pointerNotice: '注视', pointerFocus: '注视', clinging: '抓握', idle: '休息中', walking: '散步中', climbing: '攀爬中', falling: '落下中', landing: '站稳啦', thinking: '思考中', working: '创作中', speaking: '说话中', dragging: '被拎起来了', greet: '打招呼', tapHead: '摸摸头', tapBody: '回应你', attention: '听你说', error: '有点困惑' };
+const STATE_LABELS = {
+    idle: '休息中', idleShift: '换个站姿', idleGlance: '张望', idleStretch: '舒展肩臂',
+    walking: '散步中', climbing: '攀爬中', clinging: '抓握', mantling: '翻越',
+    falling: '落下中', landing: '站稳啦', dragging: '被拎起来了',
+    pointerNotice: '注视', pointerFocus: '注视', greet: '打招呼', attention: '听你说',
+    tapHead: '摸摸头', tapBody: '回应你', thinking: '思考中', working: '创作中', speaking: '说话中', error: '有点困惑',
+};
 
 function loadPetScale() {
     // localStorage 属于 renderer；原生窗口尺寸由后续 effect 通过 preload 同步。
@@ -96,7 +103,6 @@ export default function PetScene() {
     const [petScaleDraft, setPetScaleDraft] = useState(loadPetScale);
     const [speech, setSpeech] = useState('');
     const [behaviorState, setBehaviorState] = useState('idle');
-    const [windowState, setWindowState] = useState(null);
     const nativeStateRef = useRef(null);
     const [speechHeadroom, setSpeechHeadroom] = useState(0);
 
@@ -135,11 +141,12 @@ export default function PetScene() {
         let alive = true;
         const receive = state => {
             if (!alive || !state) return;
+            if (state.enabled !== nativeStateRef.current?.enabled) {
+                try { localStorage.setItem(ROAMING_KEY, String(state.enabled)); } catch { /* Session preference. */ }
+            }
             nativeStateRef.current = state;
-            setWindowState(state);
-            try { localStorage.setItem(ROAMING_KEY, String(state.enabled)); } catch { /* Session preference. */ }
-            sceneRef.current?.behavior?.setInteracting(uiPausedRef.current || Boolean(state.interactionPaused));
-            sceneRef.current?.behavior?.setLocomotion(state.state);
+            sceneRef.current?.windowMotion.receive(state, performance.now() / 1000);
+            sceneRef.current?.behavior?.setWindowState(state.state, uiPausedRef.current || Boolean(state.interactionPaused));
         };
         const unsubscribe = api.onWindowCompanion(receive);
         api.getWindowCompanion().then(receive).catch(() => {});
@@ -338,8 +345,10 @@ export default function PetScene() {
             motionController: null,
             expressionController: null,
             lookAtController: null,
+            windowMotion: new WindowMotionPhase(),
             time: 0,
         };
+        if (nativeStateRef.current) runtime.windowMotion.receive(nativeStateRef.current, performance.now() / 1000);
         sceneRef.current = runtime;
 
         const initialize = async () => {
@@ -410,12 +419,19 @@ export default function PetScene() {
                 onChange: (name, { busy }) => {
                     const mapped = runtime.manifest.states?.[name]?.motion || name;
                     runtime.motionController.play(runtime.motionController.has(mapped) ? mapped : name, { force: true });
+                    const active = runtime.motionController.current;
+                    if (active) {
+                        const windowDriven = name === 'climbing' || name === 'mantling';
+                        active.action.setEffectiveTimeScale(windowDriven ? 0 : Number(active.definition.timeScale) || 1);
+                    }
                     setBehaviorState(name);
-                    window.electronAPI?.setPetBusy?.(busy);
+                    if (runtime.busy !== busy) {
+                        runtime.busy = busy;
+                        window.electronAPI?.setPetBusy?.(busy);
+                    }
                 },
             });
-            runtime.behavior.setInteracting(uiPausedRef.current || Boolean(nativeStateRef.current?.interactionPaused));
-            runtime.behavior.setLocomotion(nativeStateRef.current?.state || 'idle');
+            runtime.behavior.setWindowState(nativeStateRef.current?.state || 'idle', uiPausedRef.current || Boolean(nativeStateRef.current?.interactionPaused));
             if (!runtime.behavior.interacting) runtime.behavior.event('greet');
             runtime.footPoint = new THREE.Vector3(0, mesh.geometry.boundingBox.min.y, 0);
             runtime.motionSources = Object.fromEntries(Object.entries(motions).map(([name, motion]) => [name, motion.source || 'vmd']));
@@ -498,24 +514,16 @@ export default function PetScene() {
                 const moving = ['walking', 'climbing', 'clinging', 'mantling'].includes(runtime.behavior?.current);
                 const targetAngle = moving ? (nativeState?.direction || 1) * (['climbing', 'clinging', 'mantling'].includes(runtime.behavior.current) ? 1.05 : 0.8) : 0;
                 runtime.model.rotation.y += (targetAngle - runtime.model.rotation.y) * (1 - Math.exp(-6 * delta));
-                // Interaction clips keep playing (breathing, settling and looking), never freeze a frame.
                 const action = runtime.motionController?.current?.action;
-                if (action) {
-                    action.paused = false;
-                    if (runtime.behavior?.current === 'mantling') {
-                        action.time = Math.max(0, Math.min(1, nativeState?.progress || 0)) * action.getClip().duration;
-                        action.setEffectiveTimeScale(0);
-                    } else if (runtime.behavior?.current === 'climbing') {
-                        action.time = (nativeState?.cycle || 0) * action.getClip().duration;
-                        action.setEffectiveTimeScale(0);
-                    }
+                if (action && runtime.windowMotion.state === runtime.behavior.current) {
+                    action.time = runtime.windowMotion.at(performance.now() / 1000) * action.getClip().duration;
                 }
             }
 
             // 顺序很重要：撤销上一帧视线 -> 完成动作过渡 -> VMD/物理更新 -> Morph ->
             // 重新叠加视线 -> 渲染。交换顺序会导致头部偏移累积或被动作覆盖。
             runtime.lookAtController?.beforeAnimation();
-            runtime.motionController?.beforeAnimationUpdate();
+            runtime.motionController?.beforeAnimationUpdate(delta);
             runtime.helper?.update(delta);
             runtime.motionController?.afterAnimationUpdate(delta);
 
@@ -580,7 +588,6 @@ export default function PetScene() {
             <PetOverlay
                 loading={loading}
                 behaviorLabel={STATE_LABELS[behaviorState] || '待机'}
-                windowState={windowState}
                 error={error}
                 speech={speech}
                 showSizePanel={showSizePanel}

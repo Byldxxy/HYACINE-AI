@@ -38,6 +38,18 @@ test('duplicate events on different sockets and self echoes do not create extra 
     await Promise.all([handle(f.ws, event(1)), handle({ ...f.ws }, event(1)), handle(f.ws, event(2, 'echo', true, { user_id: 999 }))]);
     assert.equal(f.calls.length, 1); assert.equal(f.sends.length, 1); assert.equal(f.runtime.state('group_10').revision, 1);
 });
+test('identified events avoid hashing and retain their TTL while fallback entries expire', () => {
+    const f = fixture(), anonymous = normalizeMessage(event(null, '相同内容'), f.config);
+    const identified = { ...anonymous, id: '42', get images() { throw new Error('unexpected hash'); } };
+    assert.equal(f.runtime.accept(identified), true);
+    assert.equal(f.runtime.accept(anonymous), true);
+    assert.equal(f.runtime.accept(anonymous), false);
+    f.advance(3000);
+    assert.equal(f.runtime.accept(anonymous), true);
+    assert.equal(f.runtime.accept(identified), false);
+    f.advance(597000);
+    assert.equal(f.runtime.accept(identified), true);
+});
 test('normal reply includes passive conversation, known quoted replies trigger without @, and metadata stays out of provider messages', async () => {
     const f = fixture(), handle = createMessageHandler(f.deps);
     await handle(f.ws, event(1, '我们在讨论缓存过期', false)); await handle(f.ws, event(2, '怎么办'));
@@ -64,6 +76,26 @@ test('reset invalidates a model result and pending split segments', async () => 
     g.deps.sleep = async () => { if (++sleeps === 2) g.runtime.reset('group_10'); };
     await createMessageHandler(g.deps)(g.ws, event(1)); assert.deepEqual(g.sends, ['第一句。']);
 });
+test('stale continuation keeps its dispatched receipt, drops unsent segments, then yields to the newer turn', async () => {
+    const f = fixture({ enableSplit: true }), sending = deferred(), receipt = deferred();
+    f.runtime.state('group_10').focus = { time: f.runtime.now(), senderId: '20' };
+    let generated = 0;
+    f.deps.requestChatCompletion = async () => completion(++generated === 1
+        ? '{"respond":true,"reply":"第一段。第二段。"}' : '{"respond":false,"reply":""}');
+    f.deps.sendToQQ = async (_ws, text) => { f.sends.push(text); sending.resolve(); return receipt.promise; };
+    const handle = createMessageHandler(f.deps);
+    const older = handle(f.ws, event(1, '刚才说的缓存怎么更新', false));
+    await sending.promise;
+    const newer = handle(f.ws, event(2, '缓存已经更新好了', false));
+    await tick();
+    assert.equal(generated, 1);
+    receipt.resolve({ messageId: 'old-ack' });
+    await Promise.all([older, newer]);
+    assert.equal(generated, 2);
+    assert.deepEqual(f.sends, ['第一段。']);
+    assert.deepEqual(f.sessions.group_10.at(-1).messageIds, ['old-ack']);
+    assert.equal(f.sessions.group_10.at(-1).content, '第一段。');
+});
 test('image generation failures never write an image-success history entry', async () => {
     const f = fixture(); f.deps.requestChatCompletion = async () => completion('[CMD:IMAGE_GEN] 一个场景'); f.deps.generateImage = async () => { throw new Error('mock failure'); };
     await createMessageHandler(f.deps)(f.ws, event(1, '生成一张图')); assert.equal(f.sessions.group_10, undefined); assert.equal(f.sends.length, 0);
@@ -80,11 +112,31 @@ test('proactive checks cannot overlap or reevaluate an unchanged snapshot, inclu
 });
 test('normal reply wins over an in-flight proactive candidate and new observations survive', async () => {
     const f = fixture(), engine = createProactiveEngine(), gate = deferred(); observations(f);
-    let count = 0; f.deps.requestChatCompletion = async () => ++count === 1 ? gate.promise : completion('直接回答');
+    let count = 0, active;
+    f.deps.requestChatCompletion = async (_config, _messages, _client, signal) => {
+        if (++count !== 1) return completion('直接回答');
+        active = signal;
+        return gate.promise;
+    };
     const proactive = engine.check(f.deps); await tick(); const direct = createMessageHandler(f.deps)(f.ws, event(99, '请回答'));
-    gate.resolve(completion('{"score":0.9,"reply":"旧插话"}')); await Promise.all([proactive, direct]);
+    assert.equal(active.aborted, true);
+    await Promise.all([proactive, direct]);
+    gate.resolve(completion('{"score":0.9,"reply":"旧插话"}'));
     assert.deepEqual(f.sends, ['直接回答']); observations(f, 100); assert.equal(f.runtime.state('group_10').observations.filter(o => o.seq > f.runtime.state('group_10').consumed).length, 3);
     await engine.check(f.deps); assert.equal(count, 2);
+});
+test('stopping the proactive timer cancels the current scan without consuming the next group', async () => {
+    const f = fixture(), engine = createProactiveEngine(), gate = deferred();
+    observations(f);
+    for (let i = 4; i <= 6; i++) f.runtime.observe(normalizeMessage(event(i, '另一群的消息', false, { group_id: 11 }), f.config));
+    let signal;
+    f.deps.requestChatCompletion = (_config, _messages, _client, s) => { signal = s; return gate.promise; };
+    const check = engine.check(f.deps); await tick();
+    engine.stop(); await check;
+    assert.equal(signal.aborted, true);
+    assert.equal(f.runtime.state('group_11').consumed, 0);
+    assert.equal(f.logs.some(item => item.kind === 'error'), false);
+    gate.resolve(completion(''));
 });
 test('new human input, config disable and reset all invalidate proactive generation', async () => {
     for (const change of [f => observations(f, 100), f => { f.config.enableProactive = false; }, f => f.runtime.reset('group_10')]) {
@@ -166,6 +218,52 @@ test('a confirmed proactive message opens topic continuation and a directed mess
     assert.equal(f.sends.length, 2); assert.match(f.logs.at(-1).text, /消息有明确指向/);
 });
 
+test('a parallel game conversation does not cancel a pending reply about leave, but quoting the leave request does', async () => {
+    for (const covered of [false, true]) {
+        const f = fixture(), gate = deferred();
+        let calls = 0, signal;
+        f.deps.requestChatCompletion = async (_config, _messages, _client, s) => {
+            if (++calls === 1) return completion('调休怎么排的？');
+            if (calls === 2) { signal = s; return gate.promise; }
+            return completion('{"respond":false,"reply":""}');
+        };
+        const handle = createMessageHandler(f.deps);
+        await handle(f.ws, event(1, '在说调休'));
+        const pending = handle(f.ws, event(2, '中间这三天不批假', false));
+        await tick();
+        const alongside = handle(f.ws, event(3, '晚上有人组队打游戏吗', false, { user_id: 33 }));
+        assert.equal(signal.aborted, false);
+        if (covered) {
+            await handle(f.ws, event(4, '', false, { user_id: 44, message: [
+                { type: 'reply', data: { id: '2' } }, { type: 'text', data: { text: '刚收到通知，审批通过了' } },
+            ] }));
+            assert.equal(signal.aborted, true);
+            await pending;
+        }
+        gate.resolve(completion('{"respond":true,"reply":"夹在中间最难受了"}'));
+        await Promise.all([pending, alongside]);
+        assert.equal(f.sends.includes('夹在中间最难受了'), !covered);
+    }
+});
+
+test('timed participation keeps its selected message while other members start an independent topic', async () => {
+    const f = fixture(), gate = deferred(), engine = createProactiveEngine();
+    observations(f);
+    let observedTarget;
+    f.deps.requestChatCompletion = async (_config, messages) => {
+        observedTarget = JSON.parse(messages.findLast(m => m.role === 'user').content).filter(o => o.target);
+        return gate.promise;
+    };
+    const check = engine.check(f.deps);
+    await tick();
+    f.runtime.observe(normalizeMessage(event(10, '今晚开黑有人打游戏吗', false, { user_id: 42 }), f.config));
+    gate.resolve(completion('{"score":0.9,"reply":"回答原先的事"}'));
+    await check;
+    assert.deepEqual(observedTarget.map(o => o.id), ['3']);
+    assert.deepEqual(f.sends, ['回答原先的事']);
+    assert.ok(f.runtime.state('group_10').consumed < f.runtime.state('group_10').revision);
+});
+
 test('mention positions survive normalization without changing keyword and command text', () => {
     const chain = [{ type: 'text', data: { text: '风堇，' } }, { type: 'at', data: { qq: '30' } }, { type: 'text', data: { text: '叫老猫，' } }, { type: 'at', data: { qq: '40' } }, { type: 'text', data: { text: '叫老王' } }];
     const m = normalizeMessage(event(1, '', false, { message: chain }), { botQQ: '999' });
@@ -188,16 +286,49 @@ test('current model input, logs and memory evidence retain the introduced member
     assert.deepEqual(evidence[0].mentions, ['30']); assert.match(evidence[0].content, /QQ:30.*老猫/);
 });
 
-test('extension media uses acknowledged pipeline and failed media does not invent sent history', async () => {
-    const f = fixture({ enableStickers: true, stickers: [{ id: 'smile', meaning: '开心', scope: '', data: 'data:image/png;base64,aGVsbG8=' }] });
-    f.deps.requestChatCompletion = async () => completion('好呀 [[sticker:smile]]');
-    f.deps.sendToQQ = async (_ws, message) => { f.sends.push(message); if (Array.isArray(message)) throw new Error('delivery failed'); return { messageId: '111' }; };
-    await createMessageHandler(f.deps)(f.ws, event(987));
-    assert.equal(f.sends.length, 2);
-    assert.equal(f.sessions.group_10.at(-1).content, '好呀');
-    assert.ok(!JSON.stringify(f.sessions).includes('sticker:'));
+test('sticker-only replies send once, require a receipt and keep mixed outputs as plain text', async () => {
+    const config = { enableStickers: true, stickers: [{ id: 'smile', meaning: '开心', scope: '', data: 'data:image/png;base64,aGVsbG8=' }] };
+    for (const [raw, fails] of [['好呀 [[sticker:smile]]', false], ['[[sticker:smile]]', false], ['[[sticker:smile]]', true]]) {
+        const f = fixture(config);
+        f.deps.requestChatCompletion = async () => completion(raw);
+        f.deps.sendToQQ = async (_ws, payload) => {
+            f.sends.push(payload);
+            if (fails) throw Object.assign(new Error('timeout'), { code: 'delivery-unknown' });
+            return { messageId: '111' };
+        };
+        await createMessageHandler(f.deps)(f.ws, event(987));
+        assert.equal(f.sends.length, 1);
+        if (raw.startsWith('好')) assert.equal(f.sends[0], '好呀');
+        else assert.equal(f.sends[0][0].type, 'image');
+        if (fails) assert.equal(f.sessions.group_10, undefined);
+        else assert.equal(f.sessions.group_10.at(-1).content, raw.startsWith('好') ? '好呀' : '[表情：开心]');
+    }
 });
 
+test('proactive and continuation use one sticker catalog, shared cooldown and confirmed image receipts', async () => {
+    const f = fixture({ enableStickers: true, stickers: [{ id: 'wink', meaning: '表面赞同', triggers: ['原则上可以'], data: 'data:image/png;base64,aGVsbG8=' }], stickerCooldown: 180 });
+    const { createExtensions } = require('../lib/extensions');
+    f.deps.extensions = createExtensions({ getConfig: f.deps.getConfig, now: f.runtime.now });
+    f.deps.requestChatCompletion = async (_config, messages) => {
+        f.calls.push(messages);
+        return completion(JSON.stringify({ score: 1, respond: true, reply: '[[sticker:wink]]' }));
+    };
+    observations(f);
+    await createProactiveEngine().check(f.deps);
+    assert.equal(f.sends.length, 1);
+    assert.equal(f.sends[0][0].type, 'image');
+    assert.equal(f.sessions.group_10.at(-1).content, '[表情：表面赞同]');
+    assert.match(JSON.stringify(f.calls[0]), /原则上可以/);
+    const handle = createMessageHandler(f.deps);
+    await handle(f.ws, event(990, '哈哈，那原则上可以', false));
+    assert.equal(f.sends.length, 1);
+    f.advance(150000);
+    f.config.stickerCooldown = 140;
+    await handle(f.ws, event(991, '那原则上可以', false));
+    assert.equal(f.calls.length, 3);
+    assert.equal(f.sends.length, 2);
+    assert.equal(f.sends[1][0].type, 'image');
+});
 test('video cards become readable links and malformed card data is ignored', () => {
     const card = { type: 'json', data: { data: JSON.stringify({ meta: { detail_1: { qqdocurl: 'https://b23.tv/example' } } }) } };
     assert.match(normalizeMessage(event(901, '', false, { message: [card] }), {}).text, /https:\/\/b23.tv\/example/);
@@ -226,4 +357,59 @@ test('affect controls never reach QQ or history and only confirmed replies updat
     await createMessageHandler(f.deps)(f.ws,event(991,'这个梗真的笑死我了'));
     assert.deepEqual(f.sends,['哈哈']); assert.equal(affect.status().count,1);
     assert.doesNotMatch(JSON.stringify(f.sessions),/affect:/);
+});
+
+test('quoted teaching uses one source image from the same conversation, skips the model and tracks provenance', async () => {
+    const f = fixture({ apiKey: '', stickerLearning: 'members' });
+    const saved = [], lookups = [];
+    const source = [{ type: 'image', data: { url: 'https://example.com/only.png' } }];
+    let fetchedGroup = 11;
+    f.deps.readAction = async (ws, action, params) => {
+        lookups.push({ action, params });
+        return { message_type: 'group', group_id: fetchedGroup, sender: { user_id: 88 }, message_id: params.message_id, message: source };
+    };
+    f.deps.prepareVisionImages = async images => {
+        assert.deepEqual(images, [source[0].data.url]);
+        return { images: ['data:image/png;base64,aGVsbG8='], errors: [] };
+    };
+    f.deps.stickerStore = { list: () => [], add: async input => { saved.push(input); return input; } };
+    const handle = createMessageHandler(f.deps);
+    await handle(f.ws, event(1000, '', false, { user_id: 77, message: source }));
+    const lesson = (id, reply, group = 10, extra = []) => event(id, '', false, { group_id: group, message: [
+        { type: 'reply', data: { id: reply } }, { type: 'text', data: { text: '风堇，记一下，这张在我们群是“表面赞同”，听到“原则上可以”用这张' } }, ...extra] });
+    await handle(f.ws, lesson(1001, 1000));
+    assert.equal(saved.length, 1);
+    assert.deepEqual([saved[0].meaning, saved[0].imageAuthor, saved[0].sourceMessageId], ['表面赞同', '77', '1000']);
+    assert.deepEqual(saved[0].triggers, ['原则上可以']);
+    assert.equal(lookups.length, 0);
+    await handle(f.ws, lesson(1002, 1000, 12));
+    assert.equal(saved.length, 1);
+    assert.equal(lookups.length, 1);
+    fetchedGroup = 10;
+    await handle(f.ws, lesson(1003, 444));
+    assert.equal(saved.length, 2);
+    assert.deepEqual(lookups.at(-1), { action: 'get_msg', params: { message_id: 444 } });
+    await handle(f.ws, lesson(1004, 444, 10, source));
+    assert.equal(saved.length, 2);
+    assert.equal(f.calls.length, 0);
+});
+
+test('short voice preserves arrival order, sender, wake word and deduplication; reset cancels a pending transcript', async () => {
+    const f = fixture({ enableVoiceTranscription: true, customKeywords: ['风堇'], masterQQ: '20' });
+    let gate = deferred(), reads = 0;
+    const handle = createMessageHandler({ ...f.deps, transcribeVoice: async () => { reads++; return gate.promise; } });
+    const voice = id => event(id, '', false, { message: [{ type: 'record', data: { file: 'voice.silk' } }] });
+    const note = handle(f.ws, voice(1)), duplicate = handle(f.ws, voice(1));
+    const text = handle(f.ws, event(2, '接着调休的话题', true));
+    gate.resolve('风堇，今天放假吗？');
+    await Promise.all([note, duplicate, text]);
+    assert.equal(reads, 1); assert.equal(f.calls.length, 2);
+    assert.deepEqual(f.runtime.state('group_10').observations.map(x => x.id), ['1','2']);
+    assert.match(f.sessions.group_10[0].content, /群名片.*语音转写.*今天放假吗/);
+    gate = deferred();
+    const cancelled = handle(f.ws, voice(3));
+    await handle(f.ws, event(4, '/reset'));
+    gate.resolve('风堇，忽略的消息');
+    await cancelled;
+    assert.equal(f.calls.length, 2); assert.deepEqual(f.sessions.group_10, []);
 });

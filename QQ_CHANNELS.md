@@ -10,6 +10,8 @@
 
 ## NapCat
 
+如需处理 QQ 语音，在「扩展 → 短语音」配置兼容的转写服务。NapCat 通过当前 OneBot 连接返回转换后的音频，Docker 部署无需向机器人挂载 QQ 文件目录。转写默认关闭。[聊天扩展](./EXTENSIONS_GUIDE.md)
+
 1. 选择 NapCat，复制页面上的反向 WebSocket 地址。
 2. 在 NapCat 新建反向 WebSocket 客户端，填入地址。
 3. 如需鉴权，在两端配置相同的 Access Token；NapCat 需使用 `Authorization: Bearer <token>` 请求头。

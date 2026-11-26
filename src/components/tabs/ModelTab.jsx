@@ -57,7 +57,7 @@ export default function ModelTab({ config, handleChange, avatarList, fetchAvatar
                         value={config.maxReplyLength}
                         suffix=" 字"
                         min="20"
-                        max="500"
+                        max={Math.max(1000, Number(config.maxReplyLength) || 0)}
                         step="10"
                         onChange={(e) => handleChange('maxReplyLength', Number(e.target.value))}
                     />

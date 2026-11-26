@@ -95,8 +95,9 @@ test('deletion persists history and summary removal, cancels active and queued w
     const outdated = Promise.allSettled([first, second]);
     await tick();
     await f.conversation.reset('group');
-    assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.directory, 'memory.json'))), {});
-    assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.directory, 'summary.json'))), {});
+    await f.memory.loadAll();
+    assert.deepEqual(f.memory.getSessions(), {});
+    assert.deepEqual(f.memory.getSummaries(), {});
     const fresh = f.conversation.chat({ scenario: 'group', message: '删除后提问' });
     gate.resolve(completion('迟到的旧回答'));
     for (const result of await outdated) {

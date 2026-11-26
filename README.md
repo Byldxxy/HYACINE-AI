@@ -3,12 +3,12 @@
 一个面向 QQ 群聊的本地化 AI 机器人与桌宠项目。通过 NapCat、SnowLuma（OneBot v11）或官方 QQ Bot 接收 QQ 消息，连接 OpenAI Chat Completions 兼容模型，并提供角色设定、图片理解、生图、记忆、主动发言、Web 管理面板和 Electron 桌面互动。
 
 [![CI](https://github.com/Byldxxy/HYACINE-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/Byldxxy/HYACINE-AI/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v1.3.0-ef5da8)](https://github.com/Byldxxy/HYACINE-AI/tree/v1.3.0)
+[![Release](https://img.shields.io/badge/release-v1.4.0-ef5da8)](https://github.com/Byldxxy/HYACINE-AI/tree/v1.4.0)
 [![License](https://img.shields.io/badge/license-MIT-2f855a)](./LICENSE)
 
-- [1.3.0 更新日志](./CHANGELOG.md)：新增能力、兼容性与升级说明。
+- [1.4.0 更新日志](./CHANGELOG.md)：新增能力、兼容性与升级说明。
 - [人格与记忆扩展评估](./HUMANIZATION_RESEARCH.md)：参考项目、兼容性、表达连续性和记忆召回。
-- [聊天扩展](./EXTENSIONS_GUIDE.md)：表情素材管理、B 站链接资料和扩展边界。
+- [聊天扩展](./EXTENSIONS_GUIDE.md)：引用教表情、素材管理、短语音转写和 B 站资料。
 - [QQ 渠道配置](./QQ_CHANNELS.md)：NapCat、SnowLuma 与官方 QQ Bot 的接入步骤和能力差异。
 - [消息处理架构](./BOT_LOGIC.md)：触发、旁听、主动发言、发送回执及记忆边界。
 - [WebUI 使用与结构](./WEBUI_GUIDE.md)：工作台导航、草稿保存、状态反馈与前端模块。
@@ -27,6 +27,8 @@
 - 支持 @ 机器人、句首唤醒词和全量回复三种触发方式。
 - 按群与 QQ 号区分成员，支持群名片、外号和有来源的偏好记忆。
 - 支持围绕近期话题的多人免 @ 续聊，普通回复和主动发言均可承接；由上下文判断是否参与。
+- 支持引用群友的单图教表情，按群维护含义和触发例句。NapCat 可接入短语音转写。
+- WebUI 可回放多人片段，预览指定消息触发的文字、表情或旁听结果。
 - 兼容 OpenAI Chat Completions 风格的文本模型服务。
 - 同一会话串行处理，支持分段回复、引用机器人消息继续对话和会话重置。
 - 消息 ID 去重、排除自身回声；收到 OneBot 成功回执或官方消息 ID 才写入回复记忆，失败或未知结果不自动重发。
@@ -52,7 +54,8 @@
 - 连续云庭场景与生成式导航徽记；风堇支持招手、思考、微笑三种姿势，随页面和交互变化，可关闭动态效果。
 - 以工作台为入口，按对话、记忆、人设、模型、连接组织功能，延续粉色半透明面板与统一控件。
 - 工作台区分后端就绪、QQ 连接与模型配置状态，提供设置入口和最近活动；模型已配置不代表已完成连通性测试。
-- 配置采用独立编辑草稿，显示保存进度、错误和未保存状态；保存期间的新修改保留，记忆使用各自的保存入口。
+- 配置按字段保存，记忆按条目保存。两个窗口修改同一内容时可核对差异，群内新消息与未提交的草稿均会保留。
+- 「运行日志 → 调用统计」可按群查看近七天的模型用量、参与结果及排队、生成和 QQ 发送耗时。
 - 对话页使用独立测试会话，支持主人身份切换、输入法安全发送和清空确认；模型调用失败不写入后端聊天历史。
 - 提供可预览、编辑和撤销的风堇群聊预设，以及图片测试、实时日志和脱敏诊断导出。
 - `Cmd/Ctrl + K` 快速跳转，`Cmd/Ctrl + S` 保存配置；页面与日志延迟加载，遵循系统减少动态效果设置。
@@ -69,25 +72,18 @@
 ## 系统架构
 
 ```text
-QQ / NapCat
-    │ OneBot v11 reverse WebSocket
-    ▼
-server.js
-    ├── 消息触发、身份、人设和记忆上下文
-    ├── OpenAI 兼容文本 / 视觉模型
-    ├── 可选生图模型
-    ├── REST 管理 API
-    └── WebSocket 日志与桌宠事件
-             │
-             ├──────────────► React WebUI
-             │
-Electron main process
-    ├── utility process 运行 server.js
-    ├── 透明桌宠窗口与系统托盘
-    └── 主显示器采样、隐私过滤和变化检测
-             │
-             ▼
-        Three.js MMD pet
+NapCat（反向 WebSocket）┐
+SnowLuma（正向 WebSocket）├─► 渠道适配 ─► 消息规范化 ─► 会话队列
+官方 QQ Bot（Webhook）  ┘                                │
+                               直接回复 / 续聊 / 主动参与
+                                         │
+                            人设、群内记忆、模型与表情选择
+                                         │
+                                  QQ 发送回执 ─► 会话存储
+
+React WebUI ◄── REST / WebSocket ──► server.js
+Electron 主进程 ◄── IPC ──► server.js
+    └── 系统托盘、桌面感知与 Three.js MMD 桌宠窗口
 ```
 
 | 层 | 技术 |
@@ -96,7 +92,7 @@ Electron main process
 | 后端 | Node.js、Express 5、ws、OpenAI SDK |
 | 桌宠 | Electron、Three.js MMD |
 | 数据 | 本地 JSON、Zod 校验、原子写入与 `.bak` 恢复 |
-| QQ 协议 | NapCat / OneBot v11 |
+| QQ 接入 | NapCat 与 SnowLuma 使用 OneBot v11，官方 QQ Bot 使用 Webhook 与开放平台 API |
 | 打包 | Electron Builder、NSIS |
 | CI | GitHub Actions：Windows、macOS、Linux |
 
@@ -106,7 +102,7 @@ Electron main process
 
 - Node.js `22.12.0` 或更高版本。
 - Git。
-- 需要 QQ 功能时，准备 NapCat 或其他 OneBot v11 兼容实现。
+- 使用 QQ 功能时选择一种接入方式，配置步骤见 [QQ 渠道配置](./QQ_CHANNELS.md)。
 - 需要桌宠时，自行准备拥有使用权的 MMD 模型和贴图。
 
 ### 获取源码与依赖
@@ -120,7 +116,7 @@ npm ci
 如需固定使用当前稳定版本：
 
 ```bash
-git checkout v1.3.0
+git checkout v1.4.0
 ```
 
 ### 本地环境变量
@@ -196,13 +192,16 @@ VITE_PET_MANIFEST_PATH=/pet-manifest.json
 ```text
 data/
 ├── avatars/
+├── stickers/
 ├── bot-config.json
-├── bot-sessions.json
-├── bot-summaries.json
+├── bot-sessions.json.d/
+├── usage-metrics.json
 └── bot-persistent-memory.json
 ```
 
 安装后的 Electron 应用使用操作系统用户数据目录，不向安装目录写入私人数据。
+
+升级时自动导入旧版 `bot-sessions.json` 和 `bot-summaries.json`。日常备份请先退出后端，再复制整个 `data/` 目录。
 
 以下内容由 `.gitignore` 和发布边界检查排除：
 
@@ -251,7 +250,7 @@ GitHub Actions 会在 Windows、macOS 和 Linux 上执行依赖安装、lint、�
 
 ## 当前版本与路线图
 
-当前源码版本为 `1.3.0`。已完成能力、稳定设计约束、验证基线、已知限制和后续优先级统一维护在 [PROJECT_TRACKER.md](./PROJECT_TRACKER.md)。
+当前源码版本为 `1.4.0`。已完成能力、稳定设计约束、验证基线、已知限制和后续优先级统一维护在 [PROJECT_TRACKER.md](./PROJECT_TRACKER.md)。
 
 ## 许可证
 

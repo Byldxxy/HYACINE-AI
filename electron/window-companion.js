@@ -73,7 +73,8 @@ function createWindowCompanion({ getWindow, screen, onStatus = () => {}, onEnabl
         if (!win || win.isDestroyed() || !win.isVisible() || suspended || !ready || !world.enabled) return;
         // Hover may stop a walk, but should never suspend gravity in mid-air.
         const pointerOnly = uiPauses.size > 0 && [...uiPauses.values()].every(mode => mode === 'pointer');
-        if (resizing || (uiPauses.size > 0 && !(pointerOnly && world.state === 'falling'))) { publish(); return; }
+        const settling = world.state === 'landing' || (pointerOnly && world.state === 'falling');
+        if (resizing || (uiPauses.size > 0 && !settling)) { publish(); return; }
         if (!validCoordinate(world.actor.x) || !validCoordinate(world.actor.y)) recoverPosition();
         world.setArea(screen.getDisplayNearestPoint({ x: Math.round(world.actor.x), y: Math.round(world.actor.y) }).workArea);
         if (time >= nextScan) { nextScan = time + (process.platform === 'win32' ? 1500 : 600); void scan(); }

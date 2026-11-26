@@ -23,8 +23,10 @@ const { officialIdentity } = require('./lib/qq-identity');
 const { createOfficialBot, challenge, verifyCallback } = require('./lib/qq-official');
 const { createOneBotClient } = require('./lib/onebot-client');
 const { timingSafeEqual } = require('node:crypto');
-const { maskApiKey } = require('./lib/utils');
+const { createUsageMetrics } = require('./lib/usage-metrics');
+const { invalid, isObject } = require('./lib/management-edits');
 const { createAffect } = require('./lib/extensions/affect');
+const { createExtensions } = require('./lib/extensions');
 const affect = createAffect();
 const { createStickerStore } = require('./lib/extensions/sticker-store');
 const { createConfigManager } = require('./lib/config');
@@ -33,6 +35,7 @@ const { restartProactiveTimer, stopProactiveTimer } = require('./lib/proactive')
 const { createMessageHandler, sendToQQ } = require('./lib/message-handler');
 const { createConversationRuntime } = require('./lib/conversation-runtime');
 const { createTestConversation } = require('./lib/test-conversation');
+const { replayGroupScene } = require('./lib/group-replay');
 const qqTransport = require('./lib/qq-transport');
 const { generateImage } = require('./lib/image-gen');
 const { createDesktopAwarenessEngine, normalizeDesktopAwarenessConfig } = require('./lib/desktop-awareness');
@@ -66,15 +69,16 @@ const BIND_HOST = process.env.BIND_HOST || '127.0.0.1';
 const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
 
 function sendManagementError(res, error) {
-    const invalidInput = error?.code === 'invalid-data';
-    if (!invalidInput) console.error('管理 API 操作失败:', error);
-    return res.status(invalidInput ? 400 : 500).json({
+    const status = { 'invalid-data': 400, conflict: 409, 'precondition-required': 428 }[error?.code] || 500;
+    if (status === 500) console.error('管理 API 操作失败:', error);
+    return res.status(status).json({
         success: false,
-        error: invalidInput ? error.message : '服务器写入失败',
+        error: status < 500 ? error.message : '服务器写入失败',
     });
 }
 
 app.use(cors({
+    exposedHeaders: ['ETag'],
     origin(origin, callback) {
         if (!origin || LOCAL_ORIGIN_RE.test(origin)) return callback(null, true);
         return callback(new Error(`CORS origin not allowed: ${origin}`));
@@ -119,9 +123,7 @@ onParentMessage((message) => {
         }
     }
     if (message?.type === 'set-desktop-awareness-enabled') {
-        const config = configManager.getConfig();
-        configManager.saveConfig({
-            ...config,
+        configManager.patchConfig({
             enableDesktopAwareness: Boolean(message.enabled),
         }).then(() => {
             syncDesktopAwarenessConfig();
@@ -133,9 +135,7 @@ onParentMessage((message) => {
         });
     }
     if (message?.type === 'set-desktop-capture-hide-pet') {
-        const config = configManager.getConfig();
-        configManager.saveConfig({
-            ...config,
+        configManager.patchConfig({
             desktopAwarenessHidePetFromCapture: Boolean(message.enabled),
         }).then(() => {
             syncDesktopAwarenessConfig();
@@ -156,7 +156,8 @@ const configManager = createConfigManager({ configFile: CONFIG_FILE });
 const stickerStore = createStickerStore(path.join(runtimePaths.dataDir, 'stickers'));
 
 // --- 创建记忆管理器 ---
-const memory = createMemoryManager({ MEMORY_FILE, SUMMARY_FILE, PERSISTENT_FILE });
+const metrics = createUsageMetrics({ file: path.join(runtimePaths.dataDir, 'usage-metrics.json') });
+const memory = createMemoryManager({ MEMORY_FILE, SUMMARY_FILE, PERSISTENT_FILE }, { metrics });
 
 // --- 日志广播工具 ---
 const broadcastLog = (wss, type, message) => {
@@ -218,9 +219,13 @@ function effectiveChatConfig() {
     if (config.qqProvider !== 'qqbot') return config;
     return { ...config, botQQ: officialIdentity(config, 'bot'), masterQQ: config.qqBotMasterId ? officialIdentity(config, config.qqBotMasterId) : '' };
 }
+const chatExtensions = createExtensions({ getConfig: effectiveChatConfig, stickerStore,
+    log: (type, text) => wssRef && broadcastLog(wssRef, type, text) });
 const handleQQMessage = createMessageHandler({
+    metrics,
     runtime: conversationRuntime,
     stickerStore,
+    extensions: chatExtensions,
     affect,
     // Official OpenIDs must never be compared to personal QQ account numbers.
     getConfig: effectiveChatConfig,
@@ -243,9 +248,9 @@ async function initSystem() {
             try { await stickerStore.add({ ...item, source: 'migration' }); }
             catch (error) { failed.push(item); console.error('旧表情迁移未完成:', error.message); }
         }
-        await configManager.saveConfig({ ...oldConfig, stickers: failed });
+        await configManager.patchConfig({ stickers: failed });
     }
-    await memory.loadAll();
+    await Promise.all([memory.loadAll(), metrics.load()]);
     syncDesktopAwarenessConfig();
 }
 const initPromise = initSystem().then(() => { systemReady = true; });
@@ -321,32 +326,36 @@ app.patch('/api/stickers/:id', async (req, res) => {
 app.delete('/api/stickers/:id', async (req, res) => {
     try { await initPromise; await stickerStore.remove(req.params.id); res.json({ success: true }); } catch (error) { sendManagementError(res, error); }
 });
-// 配置读取 (脱敏)
-app.get('/api/config', (req, res) => {
-    const config = configManager.getConfig();
-    const safeConfig = { ...config };
-    safeConfig.httpPort = String(API_PORT);
-    safeConfig.wsUrl = `ws://${BIND_HOST}:${API_PORT}`;
-    for (const field of ['onebotToken', 'snowlumaToken', 'qqBotSecret']) if (safeConfig[field]) safeConfig[field] = '***';
-    if (safeConfig.apiKey) {
-        safeConfig.apiKey = maskApiKey(safeConfig.apiKey);
-    }
-    res.json(safeConfig);
+function configView() {
+    return { ...configManager.publicConfig(), httpPort: String(API_PORT), wsUrl: `ws://${BIND_HOST}:${API_PORT}` };
+}
+app.get('/api/config', async (_req, res) => {
+    await initPromise;
+    const view = configView();
+    res.set('ETag', '"' + view._revision + '"').set('Cache-Control', 'no-store').json(view);
 });
 
-// 配置保存
-app.post('/api/config', async (req, res) => {
+async function updateConfiguration(req, res) {
     try {
-        const incoming = req.body;
-        await configManager.saveConfig(incoming);
+        await initPromise;
+        if (req.method === 'PATCH') {
+            if (!isObject(req.body?.base)) throw invalid('缺少配置基线');
+            await configManager.patchConfig(req.body.changes, req.body.base, req.body.secretVersions);
+        } else await configManager.saveConfig(req.body, { conditional: true, ifMatch: req.get('If-Match')?.replace(/^"|"$/g, '') });
         syncQQChannels();
         if (wssRef) broadcastLog(wssRef, 'system', '配置已更新');
-        enhancedRestartProactiveTimer();
+        syncProactiveTimer();
         syncDesktopAwarenessConfig();
-        res.json({ success: true });
+        res.json({ success: true, config: configView() });
     } catch (error) {
         sendManagementError(res, error);
     }
+}
+app.patch('/api/config', updateConfiguration);
+app.post('/api/config', updateConfiguration);
+app.get('/api/metrics', async (_req, res) => {
+    await initPromise;
+    res.set('Cache-Control', 'no-store').json(metrics.snapshot());
 });
 
 // --- Electron 桌宠窗口 ---
@@ -406,86 +415,29 @@ app.get('/api/diagnostics', (_req, res) => {
     }));
 });
 
-// --- 记忆 API ---
-app.get('/api/memory/list', (req, res) => {
-    const sessions = memory.getSessions();
-    const list = Object.keys(sessions).map(key => ({
-        id: key,
-        count: sessions[key].length,
-        lastUpdate: new Date().toLocaleTimeString(),
-        preview: sessions[key].length > 0 ? sessions[key][sessions[key].length - 1].content.substring(0, 30) : "(空)"
-    }));
-    res.json(list);
-});
-
-app.get('/api/memory/:sessionId', (req, res) => {
-    const sessions = memory.getSessions();
-    res.json(sessions[req.params.sessionId] || []);
-});
-
-app.post('/api/memory/:sessionId', async (req, res) => {
-    try {
-        conversationRuntime.reset(req.params.sessionId);
-        await conversationRuntime.enqueue(req.params.sessionId, async () => {
-            memory.setSession(req.params.sessionId, req.body);
-            await memory.saveMemoryToDisk();
-        });
-        if (wssRef) broadcastLog(wssRef, 'system', `✏️ 会话 [${req.params.sessionId}] 记忆已被手动修改`);
-        res.json({ success: true });
-    } catch (error) {
-        sendManagementError(res, error);
-    }
-});
-
-app.delete('/api/memory/:sessionId', async (req, res) => {
-    conversationRuntime.reset(req.params.sessionId);
-    const sessions = memory.getSessions();
-    const summaries = memory.getSummaries();
-    delete sessions[req.params.sessionId];
-    delete summaries[req.params.sessionId];
-    await memory.saveMemoryToDisk();
-    await memory.saveSummariesToDisk();
-    if (wssRef) broadcastLog(wssRef, 'system', `🗑️ 会话 [${req.params.sessionId}] 记忆已删除`);
-    res.json({ success: true });
-});
-
-app.delete('/api/memory', async (req, res) => {
-    conversationRuntime.reset();
-    memory.setSessions({});
-    memory.setSummaries({});
-    await memory.saveMemoryToDisk();
-    await memory.saveSummariesToDisk();
-    if (wssRef) broadcastLog(wssRef, 'system', '🧹 全局记忆已重置');
-    res.json({ success: true });
-});
-
-// --- 摘要 API ---
-app.get('/api/summary/:sessionId', (req, res) => {
-    const summaries = memory.getSummaries();
-    res.json({ summary: summaries[req.params.sessionId] || '' });
-});
-
-app.post('/api/summary/:sessionId', async (req, res) => {
-    try {
-        conversationRuntime.reset(req.params.sessionId);
-        memory.setSummary(req.params.sessionId, req.body?.summary ?? '');
-        await memory.saveSummariesToDisk();
-        if (wssRef) broadcastLog(wssRef, 'system', `📝 会话 [${req.params.sessionId}] 摘要已更新`);
-        res.json({ success: true });
-    } catch (error) {
-        sendManagementError(res, error);
-    }
+require('./lib/session-history-api').registerHistoryApi(app, {
+    memory, runtime: conversationRuntime, ready: initPromise, sendManagementError,
+    log: message => { if (wssRef) broadcastLog(wssRef, 'system', message); },
 });
 
 // --- 持久化记忆 API ---
-app.get('/api/persistent-memory', (req, res) => {
-    res.json(memory.getPersistentMemory());
+app.get('/api/persistent-memory', async (req, res) => {
+    await initPromise;
+    res.set('ETag', memory.factsTag()).set('Cache-Control', 'no-store').json(memory.getPersistentMemory());
 });
 
+app.patch('/api/persistent-memory', async (req, res) => {
+    try {
+        await initPromise;
+        if (!Array.isArray(req.body?.operations)) throw invalid('缺少长期记忆修改列表');
+        await memory.writeFacts(req.body.operations);
+        res.json({ success: true, items: memory.getPersistentMemory() });
+    } catch (error) { sendManagementError(res, error); }
+});
 app.post('/api/persistent-memory', async (req, res) => {
     try {
-        memory.setPersistentMemory(req.body);
-        await memory.savePersistentMemoryToDisk();
+        await initPromise;
+        await memory.writeFacts(null, req.body, req.get('If-Match') || '');
         if (wssRef) broadcastLog(wssRef, 'system', '💾 持久化记忆已更新');
         res.json({ success: true });
     } catch (error) {
@@ -494,13 +446,27 @@ app.post('/api/persistent-memory', async (req, res) => {
 });
 
 app.delete('/api/persistent-memory', async (req, res) => {
-    memory.setPersistentMemory([]);
-    await memory.savePersistentMemoryToDisk();
-    if (wssRef) broadcastLog(wssRef, 'system', '🧹 持久化记忆已清空');
-    res.json({ success: true });
+    try {
+        await initPromise;
+        await memory.writeFacts(null, [], req.get('If-Match'));
+        if (wssRef) broadcastLog(wssRef, 'system', '🧹 持久化记忆已清空');
+        res.json({ success: true });
+    } catch (error) { sendManagementError(res, error); }
 });
 
 // --- 测试对话 API ---
+app.post('/api/group-replay', async (req, res) => {
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    try {
+        await initPromise;
+        const result = await replayGroupScene(req.body, { config: configManager.getConfig(), stickerStore, signal: controller.signal });
+        if (!controller.signal.aborted) res.json(result);
+    } catch (error) {
+        if (!controller.signal.aborted) res.status(error.code === 'invalid-data' ? 400 : 502).json({ error: error.message });
+    }
+});
+
 app.post('/api/test-chat', async (req, res) => {
     const { message } = req.body;
     if (!message || !configManager.getConfig().apiKey) {
@@ -661,6 +627,8 @@ initPromise.then(syncQQChannels, () => {});
 
 // --- 主动发言定时检查 (使用依赖注入) ---
 const proactiveCheckDeps = () => ({
+    metrics,
+    extensions: chatExtensions,
     config: configManager.getConfig(),
     getConfig: () => configManager.getConfig(),
     runtime: conversationRuntime,
@@ -668,18 +636,22 @@ const proactiveCheckDeps = () => ({
     napcatConnections,
     sessions: memory.getSessions(),
     sendToQQ,
-    saveMemoryToDisk: () => memory.saveMemoryToDisk(),
     broadcastLog: (ws, type, msg) => broadcastLog(wss, type, msg),
     emitPetEvent: (event, detail) => broadcastPetEvent(wss, event, detail),
     wss,
 });
 
-function enhancedRestartProactiveTimer() {
+let proactiveSignature;
+function syncProactiveTimer() {
+    const config = configManager.getConfig();
+    const signature = JSON.stringify([config.enableProactive, config.proactiveInterval, config.proactiveCooldown, config.proactiveThreshold, config.proactiveContextSize, config.proactiveTargetGroups]);
+    if (signature === proactiveSignature) return;
+    proactiveSignature = signature;
     restartProactiveTimer(proactiveCheckDeps);
 }
 
 // 配置与历史读取完成后才启动，防止初始化期间使用默认配置
-initPromise.then(() => enhancedRestartProactiveTimer(), () => {});
+initPromise.then(syncProactiveTimer, () => {});
 
 let shuttingDown = false;
 function shutdown(signal) {
@@ -691,7 +663,10 @@ function shutdown(signal) {
     conversationRuntime.reset();
     for (const connection of napcatConnections) qqTransport.disconnect(connection);
     wss.close();
-    server.close(() => process.exit(0));
+    server.close(async () => {
+        try { await metrics.flush(); process.exit(0); }
+        catch (error) { console.error('关闭时保存调用统计失败:', error.message); process.exit(1); }
+    });
     setTimeout(() => process.exit(1), 5000).unref();
 }
 

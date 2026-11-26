@@ -1,6 +1,12 @@
 /** Small original in-place companion clips. External VMDs may override any semantic clip. */
 import * as THREE from 'three';
+import { IDLE_GESTURES } from './idleGestures.js';
 import mantleProfile from './mantleProfile.json';
+
+// Ease into a held pose and release it. Offset the timings for joints that follow the lead.
+function heldPose(t, start, peak, release, end) {
+    return THREE.MathUtils.smootherstep(t, start, peak) * (1 - THREE.MathUtils.smootherstep(t, release, end));
+}
 
 function mantleSample(side, t) {
     const samples = mantleProfile.samples, index = Math.min(samples.length - 1, Math.max(0, t) * (samples.length - 1));
@@ -14,7 +20,7 @@ const BONE = {
     leftWrist: ['左手首'], rightWrist: ['右手首'], center: ['センター'],
     leftIK: ['左足ＩＫ', '左足IK'], rightIK: ['右足ＩＫ', '右足IK'],
 };
-const DURATION = { mantling: 1.6, pointerNotice: 0.65, pointerFocus: 4.8, clinging: 4.8, idle: 4.8, thinking: 4, speaking: 3.5, working: 3.5, attention: 1.3, greet: 3.3, tapHead: 2.2, tapBody: 1.8, error: 2.5, walking: 1.4, climbing: 1.8, falling: 1, dragging: 2, landing: 0.7 };
+const DURATION = { ...IDLE_GESTURES, mantling: 1.6, pointerNotice: 0.65, pointerFocus: 4.8, clinging: 4.8, idle: 4.8, thinking: 4, speaking: 3.5, working: 3.5, attention: 1.3, greet: 3.3, tapHead: 2.2, tapBody: 1.8, error: 2.5, walking: 1.4, climbing: 1.8, falling: 1, dragging: 2, landing: 0.7 };
 
 export function createCompanionMotions(mesh) {
     const bones = Object.fromEntries(Object.entries(BONE).map(([key, names]) => [key, mesh.skeleton.bones.find(b => names.includes(b.name))]));
@@ -57,6 +63,35 @@ export function createCompanionMotions(mesh) {
             let v = key === 'leftArm' ? [0, 0, -0.48] : key === 'rightArm' ? [0, 0, 0.48] : [0, 0, 0];
             if (key === 'upper') v = [0.012 * pulse, 0, 0.008 * pulse];
             if (key === 'head') v = [0, 0, 0.016 * pulse];
+            const t = time / duration;
+            if (name === 'idleShift') {
+                const shift = heldPose(t, 0, 0.34, 0.57, 0.94);
+                const follow = heldPose(t, 0.08, 0.40, 0.62, 1);
+                if (key === 'upper') v = [0.012 * pulse, 0.05 * shift, 0.075 * shift];
+                if (key === 'head') v = [0.024 * follow, 0, -0.055 * follow];
+                if (key === 'rightArm') v[2] -= 0.14 * follow;
+                if (key === 'leftElbow') v[0] -= 0.19 * follow;
+            }
+            if (name === 'idleGlance') {
+                const turn = heldPose(t, 0, 0.24, 0.57, 0.87);
+                const follow = heldPose(t, 0.09, 0.36, 0.65, 1);
+                if (key === 'head') v = [-0.045 * turn, 0.35 * turn, -0.06 * turn];
+                if (key === 'neck') v = [0, 0.10 * turn, 0];
+                if (key === 'upper') v = [0.012 * pulse, 0.12 * follow, -0.018 * follow];
+                if (key === 'leftArm') v[0] += 0.10 * follow;
+                if (key === 'rightElbow') v[0] -= 0.12 * follow;
+            }
+            if (name === 'idleStretch') {
+                const lift = heldPose(t, 0.06, 0.46, 0.60, 0.93);
+                const reach = heldPose(t, 0.17, 0.54, 0.66, 0.99);
+                const bend = heldPose(t, 0, 0.20, 0.23, 0.48) + heldPose(t, 0.62, 0.76, 0.79, 1);
+                if (key === 'rightArm') v = [-0.16 * lift, -0.10 * reach, 0.48 - 1.85 * lift];
+                if (key === 'rightElbow') v = [-0.62 * bend - 0.14 * reach, 0, 0];
+                if (key === 'rightWrist') v = [0, 0.18 * reach, -0.14 * reach];
+                if (key === 'upper') v = [-0.07 * reach, 0.055 * reach, -0.09 * reach];
+                if (key === 'head') v = [-0.09 * reach, -0.14 * reach, 0.045 * reach];
+                if (key === 'leftArm') v[2] += 0.11 * reach;
+            }
             if (['thinking','working'].includes(name)) {
                 if (key === 'head') v = [0.12, 0.06, -0.1];
                 if (key === 'rightArm') v = [-0.35, -0.1, 0.55];
@@ -146,6 +181,11 @@ export function createCompanionMotions(mesh) {
                 const position = bone.position.clone();
                 if (key === 'center') {
                     position.y += name === 'walking' ? Math.sin(phase * 2) * 0.12 * scale : name === 'landing' ? -0.6 * Math.sin(Math.PI * time / duration) ** 2 * scale : 0;
+                    if (name === 'idleShift') {
+                        const shift = heldPose(time / duration, 0, 0.34, 0.57, 0.94);
+                        position.x += 0.52 * scale * shift;
+                        position.y -= 0.14 * scale * shift;
+                    }
                 } else if (name === 'mantling') {
                     const t = time / duration, lift = Math.sin(Math.PI * t) ** 2;
                     const sample = mantleSample(key === 'leftIK' ? 'left' : 'right', t);
@@ -165,7 +205,7 @@ export function createCompanionMotions(mesh) {
             });
             tracks.push(new THREE.VectorKeyframeTrack(`.bones[${bone.name}].position`, times, values));
         }
-        const loop = !['mantling', 'pointerNotice', 'attention','greet','tapHead','tapBody','error','landing'].includes(name);
+        const loop = !(name in IDLE_GESTURES) && !['mantling', 'pointerNotice', 'attention','greet','tapHead','tapBody','error','landing'].includes(name);
         result[name] = { clip: new THREE.AnimationClip(name, duration, tracks), definition: { loop, fadeIn: 0.4, fadeOut: 0.4, priority: 0 }, source: 'built-in' };
     }
     return result;

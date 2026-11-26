@@ -7,6 +7,10 @@
  * @property {boolean} [enableAffect] - 按会话成员隔离的表达连续性
  * @property {number} [affectHalfLife] - 情绪半衰期分钟
  * @property {'balanced'|'focused'} [memoryRecallMode] - 长期记忆召回策略
+ * @property {boolean} [enableVoiceTranscription] - 启用 NapCat 短语音转写
+ * @property {string} [voiceEndpoint] - 完整转写接口地址，留空使用聊天服务
+ * @property {string} [voiceModel] - 转写模型
+ * @property {string} [voiceApiKey] - 转写服务专用密钥
  * @property {boolean} [enableBilibili] - B站链接资料读取
  * @property {'off'|'owner'|'members'} [stickerLearning] - 群内表情收录权限
  * @property {boolean} [enableStickers] - 上下文表情选择

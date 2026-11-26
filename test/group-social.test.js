@@ -24,6 +24,17 @@ test('topic continuation accepts multiple speakers but excludes directed message
     runtime.observe(msg('插话', { senderId: '30' })); assert.equal(canContinue(runtime, msg('那后来呢')), true);
     runtime.reset('group_10'); assert.equal(runtime.state('group_10').focus, null);
 });
+
+test('speaker and mentioned member retain old aliases in a large group roster', () => {
+    const facts = [];
+    rememberMember(facts, msg('叫我阿王'));
+    rememberMember(facts, msg('以后叫你阿猫', { mentions: ['30'] }));
+    for (let i = 0; i < 120; i++) rememberMember(facts, msg('路过', { senderId: String(300 + i) }));
+    const roster = memberContext(facts, [], 'group_10', msg('介绍一下', { mentions: ['30'] }));
+    assert.deepEqual(roster[0].aliases, ['阿王']);
+    assert.deepEqual(roster[1].aliases, ['阿猫']);
+    assert.ok(roster.length <= 40);
+});
 test('continuation rejects malformed output; shared group prompt scopes identity, humor and persona', () => {
     assert.equal(parseContinuation('当然会呀'), ''); assert.equal(parseContinuation('{"respond":false,"reply":"不该发送"}'), '');
     assert.equal(parseContinuation('{"respond":true,"reply":"接住了"}'), '接住了');

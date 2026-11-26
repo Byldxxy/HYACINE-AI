@@ -8,6 +8,40 @@ before(async () => {
 });
 after(async () => { await vite?.close(); });
 function setup() { let clock = 0; const behavior = new PetBehavior({ now: () => clock }); return { behavior, advance: seconds => { clock += seconds; behavior.update(); } }; }
+
+test('idle gestures stay optional, return to breathing, and reserve stretching for a longer rest', () => {
+    let clock = 0;
+    const b = new PetBehavior({ now: () => clock, random: () => 0 });
+    const at = seconds => { clock = seconds; return b.resolve(); };
+    assert.equal(at(1.9), 'idle');
+    assert.equal(at(2), 'idleShift');
+    assert.equal(b.busy, false);
+    assert.equal(at(5), 'idle');
+    assert.equal(at(13), 'idleGlance');
+    assert.equal(at(17), 'idle');
+    assert.equal(at(25), 'idleStretch');
+    b.event('thinking');
+    assert.equal(b.current, 'thinking');
+    clock = 50;
+    b.event('taskFinished');
+    assert.equal(b.current, 'idle');
+    assert.equal(at(51.9), 'idle');
+});
+
+test('a window snapshot resolves hover and movement together, interrupting idle immediately', () => {
+    let clock = 0;
+    const changes = [];
+    const b = new PetBehavior({ now: () => clock, random: () => 0, onChange: state => changes.push(state) });
+    clock = 2;
+    b.update();
+    changes.length = 0;
+    b.setWindowState('climbing', true);
+    assert.deepEqual(changes, ['clinging']);
+    changes.length = 0;
+    b.setWindowState('walking', false);
+    assert.deepEqual(changes, ['walking']);
+    assert.equal(b.busy, false);
+});
 test('touch interrupts thinking then resumes the pending task without dancing', () => {
     const { behavior: b, advance } = setup();
     b.event('thinking', { requestId: 'a' }); b.event('tapHead'); assert.equal(b.current, 'tapHead');

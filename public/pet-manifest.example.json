@@ -89,6 +89,15 @@
     "idle": {
       "motion": "idle"
     },
+    "idleShift": {
+      "motion": "idleShift"
+    },
+    "idleGlance": {
+      "motion": "idleGlance"
+    },
+    "idleStretch": {
+      "motion": "idleStretch"
+    },
     "attention": {
       "motion": "attention"
     },

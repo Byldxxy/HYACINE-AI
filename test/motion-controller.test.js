@@ -4,6 +4,7 @@ const THREE = require('three');
 
 let vite;
 let MotionController;
+let WindowMotionPhase;
 let removeSolverOwnedTracks;
 let loadManifestMotions;
 
@@ -15,6 +16,7 @@ before(async () => {
         logLevel: 'silent',
     });
     ({ MotionController } = await vite.ssrLoadModule('/src/pet/runtime/MotionController.js'));
+    ({ WindowMotionPhase } = await vite.ssrLoadModule('/src/pet/runtime/WindowMotionPhase.js'));
     ({ removeSolverOwnedTracks, loadManifestMotions } = await vite.ssrLoadModule('/src/pet/runtime/loadMotions.js'));
 });
 
@@ -25,6 +27,23 @@ after(async () => {
 function vectorTrack(name) {
     return new THREE.VectorKeyframeTrack(`.bones[${name}].position`, [0], [0, 0, 0]);
 }
+
+test('window motion crosses the climb cycle seam in both directions and holds at a paused ledge', () => {
+    const clock = new WindowMotionPhase();
+    const climb = (cycle, t) => clock.receive({ state: 'climbing', cycle, paused: false }, t);
+    climb(0.98, 0);
+    climb(0.02, 0.04);
+    assert.ok(Math.abs(clock.at(0.05) - 0.99) < 1e-6);
+    climb(0.98, 0.08);
+    assert.ok(Math.abs(clock.at(0.09) - 0.01) < 1e-6);
+    clock.receive({ state: 'mantling', progress: 0.2, paused: false }, 0.12);
+    clock.receive({ state: 'mantling', progress: 0.24, paused: false }, 0.16);
+    assert.ok(Math.abs(clock.at(0.18) - 0.22) < 1e-6);
+    clock.receive({ state: 'mantling', progress: 0.24, paused: true }, 0.18);
+    assert.equal(clock.at(2), 0.24);
+    clock.receive({ state: 'falling' }, 2.1);
+    assert.equal(clock.at(2.1), null);
+});
 
 test('removes Grant and dynamic-physics tracks without removing normal motion bones', () => {
     const clip = new THREE.AnimationClip('motion', -1, [
@@ -62,8 +81,7 @@ test('direct interaction survives desktop events and finalizes before the next M
         reset() { return this; }
         setLoop() { return this; }
         setEffectiveTimeScale() { return this; }
-        fadeIn() { return this; }
-        fadeOut() { return this; }
+        getEffectiveWeight() { return this.effectiveWeight; }
         play() { return this; }
         stop() { this.stops += 1; return this; }
         setEffectiveWeight(weight) { this.effectiveWeight = weight; return this; }
@@ -114,6 +132,54 @@ test('direct interaction survives desktop events and finalizes before the next M
     assert.equal(actions.get(clips.idle).effectiveWeight, 1);
 });
 
+
+test('rapid A/B/C/A switches preserve the rendered pose, total weight and loop phase', () => {
+    const mesh = new THREE.Object3D();
+    const mixer = new THREE.AnimationMixer(mesh);
+    const helper = { objects: new Map([[mesh, { mixer }]]) };
+    const motions = {};
+    for (const [name, x] of [['idle', 2], ['walking', 8], ['pointerFocus', -4]]) {
+        motions[name] = {
+            clip: new THREE.AnimationClip(name, 2, [new THREE.NumberKeyframeTrack('.position[x]', [0], [x])]),
+            definition: { loop: true, fadeIn: 0.4, fadeOut: 0.2 },
+        };
+    }
+    const controller = new MotionController({ mesh, helper, motions });
+    const tick = delta => {
+        controller.beforeAnimationUpdate(delta);
+        mixer.update(delta);
+    };
+    const weights = () => Object.values(motions).reduce((sum, { clip }) => {
+        const action = mixer.clipAction(clip);
+        return sum + (action.isScheduled() ? action.getEffectiveWeight() : 0);
+    }, 0);
+
+    controller.play('idle');
+    tick(0.2);
+    assert.equal(mesh.position.x, 2);
+    controller.play('walking');
+    tick(0.1);
+    const pose = mesh.position.x;
+    assert.ok(pose > 2 && pose < 8);
+    controller.play('pointerFocus');
+    tick(0);
+    assert.ok(Math.abs(mesh.position.x - pose) < 1e-6);
+    tick(0.1);
+    const idle = mixer.clipAction(motions.idle.clip);
+    const phase = idle.time;
+    const interruptedPose = mesh.position.x;
+    controller.play('idle');
+    tick(0);
+    assert.equal(idle.time, phase);
+    assert.ok(Math.abs(mesh.position.x - interruptedPose) < 1e-6);
+    tick(0.15);
+    assert.ok(Math.abs(weights() - 1) < 1e-6);
+    tick(0.26);
+    assert.equal(mesh.position.x, 2);
+    assert.equal(mixer.clipAction(motions.walking.clip).isScheduled(), false);
+    assert.equal(mixer.clipAction(motions.pointerFocus.clip).isScheduled(), false);
+    controller.dispose();
+});
 
 test('in-place external walking removes world travel and preserves the missing base-pose channels', async () => {
     const center = new THREE.Bone(); center.name = 'センター'; center.position.set(0, 10, 0);

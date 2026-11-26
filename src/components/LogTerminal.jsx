@@ -5,7 +5,9 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { ArrowDown, Check, Copy, Pause, Play, Search, Terminal, X } from 'lucide-react';
 import { IconButton } from './UIComponents';
 import PinkSelect from './PinkSelect';
+import UsageMetrics from './UsageMetrics';
 import '../styles/conversation.css';
+import '../styles/usage-metrics.css';
 
 const LEVELS = [
     { value: 'all', label: '全部级别' }, { value: 'in', label: '接收' }, { value: 'out', label: '发送' },
@@ -17,13 +19,15 @@ const formatLog = log => `[${log.time || '—'}] [${log.level || 'info'}] ${Stri
 export default function LogTerminal({ logs = [], isLogOpen, setIsLogOpen, containerRef: _containerRef }) {
     const titleId = useId(), panelRef = useRef(null), searchRef = useRef(null), scrollRef = useRef(null), copyTimer = useRef(null);
     const reducedMotion = useReducedMotion();
+    const [view, setView] = useState('logs');
     const [search, setSearch] = useState(''), [level, setLevel] = useState('all');
     const [following, setFollowing] = useState(true), [lastSeen, setLastSeen] = useState(null);
     const [copyState, setCopyState] = useState(null);
     const visibleLogs = useMemo(() => {
+        if (view !== 'logs') return [];
         const query = search.trim().toLocaleLowerCase();
         return logs.filter(log => (level === 'all' || log.level === level) && (!query || `${log.time || ''} ${String(log.content || '')}`.toLocaleLowerCase().includes(query)));
-    }, [logs, search, level]);
+    }, [logs, search, level, view]);
     const seenIndex = lastSeen ? logs.indexOf(lastSeen) : -1;
     const unread = following ? 0 : seenIndex >= 0 ? logs.length - seenIndex - 1 : logs.length;
 
@@ -36,7 +40,7 @@ export default function LogTerminal({ logs = [], isLogOpen, setIsLogOpen, contai
             if (event.defaultPrevented) return;
             if (event.key === 'Escape') { event.preventDefault(); setIsLogOpen(false); return; }
             if (event.key !== 'Tab') return;
-            const focusable = [...(panelRef.current?.querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]') || [])].filter(element => element.getClientRects().length);
+            const focusable = [...(panelRef.current?.querySelectorAll('button:not(:disabled), input:not(:disabled), summary, [tabindex="0"]') || [])].filter(element => element.getClientRects().length);
             const first = focusable[0], last = focusable.at(-1);
             if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
             else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -69,12 +73,17 @@ export default function LogTerminal({ logs = [], isLogOpen, setIsLogOpen, contai
         <button type="button" className="log-drawer-backdrop" tabIndex={-1} aria-label="关闭日志" onClick={() => setIsLogOpen(false)} />
         <motion.section ref={panelRef} className="log-drawer" role="dialog" aria-modal="true" aria-labelledby={titleId} initial={reducedMotion ? false : { x: 24 }} animate={{ x: 0 }} exit={reducedMotion ? undefined : { x: 24 }} transition={{ duration: reducedMotion ? 0 : 0.18 }}>
             <header className="log-drawer-header">
-                <div className="log-drawer-title"><Terminal aria-hidden="true" /><h2 id={titleId}>实时日志</h2><span>{logs.length}</span></div>
+                <h2 id={titleId} className="sr-only">运行日志与调用统计</h2>
+                <div className="log-view-switch" role="group" aria-label="日志视图">
+                    <button type="button" aria-pressed={view === 'logs'} onClick={() => setView('logs')}>实时日志</button>
+                    <button type="button" aria-pressed={view === 'metrics'} onClick={() => setView('metrics')}>调用统计</button>
+                </div>
                 <div className="log-drawer-actions">
-                    <IconButton icon={copyState === '已复制' ? Check : Copy} label={copyState || '复制当前日志'} disabled={visibleLogs.length === 0} onClick={copyLogs} />
+                    {view === 'logs' && <IconButton icon={copyState === '已复制' ? Check : Copy} label={copyState || '复制当前日志'} disabled={visibleLogs.length === 0} onClick={copyLogs} />}
                     <IconButton icon={X} label="关闭日志" onClick={() => setIsLogOpen(false)} />
                 </div>
             </header>
+            {view === 'metrics' ? <UsageMetrics /> : <>
             <div className="log-drawer-filters">
                 <label className="log-drawer-search"><Search aria-hidden="true" /><input ref={searchRef} value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索日志" aria-label="搜索日志" /></label>
                 <PinkSelect label="日志级别" value={level} options={LEVELS} onChange={setLevel} />
@@ -95,6 +104,7 @@ export default function LogTerminal({ logs = [], isLogOpen, setIsLogOpen, contai
                 </article>)}
             </div>
             <footer className="log-drawer-footer"><span role="status">{copyState || (following ? '自动跟随最新记录' : '已暂停自动跟随')}</span>{!following && <button type="button" onClick={resume}><ArrowDown size={13} />{unread > 0 ? `${unread} 条新日志` : '回到最新'}</button>}</footer>
+            </>}
         </motion.section>
     </motion.div>}</AnimatePresence>, document.body);
 }

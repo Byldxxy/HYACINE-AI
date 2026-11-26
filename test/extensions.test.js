@@ -12,6 +12,7 @@ test('disabled extensions do no network work; scoped stickers and cooldown are i
     Object.assign(config, { enableStickers: true, stickers: [image], stickerCooldown: 30 });
     assert.equal(ext.select('好 [[sticker:smile]]', 'group_2').sticker, undefined);
     assert.equal(ext.select('好 [[sticker:fake]]', 'group_1').text, '好');
+    assert.deepEqual(ext.select('[[silent]]', 'group_1'), { text: '', sticker: undefined });
     assert.ok(ext.reserve('group_1', 'smile'));
     assert.equal(ext.reserve('group_1', 'smile'), null);
     time += 30001; assert.ok(ext.reserve('group_1', 'smile'));
@@ -60,6 +61,7 @@ test('media store serializes writes, deduplicates per scope and survives reload'
     const store = createStickerStore(dir); await store.load();
     const [a,b,c] = await Promise.all([store.add({ data: png, meaning: '开心', scope: 'group_1' }), store.add({ data: png, meaning: '开心', scope: 'group_1' }), store.add({ data: png, meaning: '开心', scope: 'group_2' })]);
     assert.equal(a.id,b.id); assert.notEqual(a.id,c.id); assert.equal(store.list().length,2);
+    await assert.rejects(store.update(a.id, { meaning: '开心', scope: 'group_2' }), /目标会话已有/);
     await assert.rejects(store.add({ data: image.data, meaning: '假图片' }), /不是受支持/);
     await store.update(a.id, { meaning: '笑死', scope: 'group_1' });
     const reloaded = createStickerStore(dir); await reloaded.load(); assert.equal(reloaded.list()[0].meaning,'笑死');
@@ -79,4 +81,21 @@ test('different video pages use different subtitle IDs and cache entries', async
     await bili('BV1d8pU6xEZX?p=1',AbortSignal.timeout(1000));
     await bili('BV1d8pU6xEZX?p=2',AbortSignal.timeout(1000));
     assert.ok(calls.some(url=>url.endsWith('cid=20'))); assert.equal(calls.length,4);
+});
+
+test('taught trigger outranks a full catalog and scoped edits preserve or clear examples', async t => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyacine-sticker-triggers-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const store = createStickerStore(dir); await store.load();
+    const record = await store.add({ data: png, meaning: '表面赞同', scope: 'group_1', triggers: ['原则上可以'] });
+    await store.update(record.id, { meaning: '礼貌附和', scope: 'group_1' });
+    assert.deepEqual(store.list()[0].triggers, ['原则上可以']);
+    const others = Array.from({ length: 35 }, (_, i) => ({ id: 'other' + i, meaning: '可以', scope: 'group_1' }));
+    const ext = createExtensions({ getConfig: () => ({ enableStickers: true }), stickerStore: { list: () => [...others, ...store.list()] } });
+    const catalog = ext.stickerContext('group_1', '我觉得原则上可以');
+    assert.ok(catalog.includes(record.id) && catalog.indexOf(record.id) < catalog.indexOf('other0'));
+    assert.doesNotMatch(ext.stickerContext('group_2', '原则上可以'), /礼貌附和/);
+    await assert.rejects(store.update(record.id, { meaning: '礼貌附和', scope: '', triggers: Array(7).fill('a') }), /最多/);
+    await store.update(record.id, { meaning: '礼貌附和', scope: 'group_1', triggers: [] });
+    assert.deepEqual(store.list()[0].triggers, []);
 });

@@ -1,11 +1,15 @@
+import { IDLE_GESTURES } from './idleGestures.js';
+
 /** Semantic state owns intent; MotionController only blends animation clips. */
 const TIMED = { attention: 1.3, greet: 3.5, tapHead: 2.2, tapBody: 1.8, error: 2.5, landing: 0.6 };
 const BUSY_TIMEOUT = 120;
+const SHORT_IDLE_GESTURES = ['idleShift', 'idleGlance'];
 
 export class PetBehavior {
-    constructor({ onChange = () => {}, now = () => performance.now() / 1000 } = {}) {
+    constructor({ onChange = () => {}, now = () => performance.now() / 1000, random = Math.random } = {}) {
         this.onChange = onChange;
         this.now = now;
+        this.random = random;
         this.jobs = new Map();
         this.reaction = null;
         this.speechUntil = 0;
@@ -13,6 +17,10 @@ export class PetBehavior {
         this.interacting = false;
         this.interactionSince = 0;
         this.locomotion = 'idle';
+        this.idleSince = null;
+        this.idleGesture = null;
+        this.lastIdleGesture = null;
+        this.idleDue = 0;
         this.cooldowns = new Map();
         this.current = '';
         this.resolve();
@@ -56,35 +64,74 @@ export class PetBehavior {
     }
 
     setLocomotion(state) {
-        this.locomotion = ['walking', 'climbing', 'mantling', 'falling', 'landing'].includes(state) ? state : 'idle';
-        this.resolve();
+        this.setWindowState(state, this.interacting);
     }
 
     setInteracting(active) {
-        const next = Boolean(active);
-        if (next === this.interacting) return;
-        this.interacting = next;
-        if (next) {
+        this.setWindowState(this.locomotion, active);
+    }
+
+    setWindowState(state, interacting) {
+        const locomotion = ['walking', 'climbing', 'mantling', 'falling', 'landing'].includes(state) ? state : 'idle';
+        const next = Boolean(interacting);
+        if (next === this.interacting && locomotion === this.locomotion) return;
+        this.locomotion = locomotion;
+        if (next && !this.interacting) {
             this.interactionSince = this.now();
             // A cursor greeting replaces background greetings, but never discards a task or touch.
             if (['greet', 'attention'].includes(this.reaction?.state)) this.reaction = null;
         }
+        this.interacting = next;
         this.resolve();
+    }
+
+    resolveIdle(time) {
+        if (this.idleSince === null) {
+            this.idleSince = time;
+            // A brief walking pause can pass without starting a gesture.
+            this.idleDue = time + 2 + this.random() * 4;
+        }
+        if (time < this.idleDue) return this.idleGesture || 'idle';
+        if (this.idleGesture) {
+            this.idleGesture = null;
+            this.idleDue = time + 8 + this.random() * 10;
+            return 'idle';
+        }
+        let next;
+        if (time - this.idleSince >= 25 && this.lastIdleGesture !== 'idleStretch' && this.random() < 0.3) {
+            next = 'idleStretch';
+        } else {
+            const choices = SHORT_IDLE_GESTURES.filter(name => name !== this.lastIdleGesture);
+            next = choices[Math.floor(this.random() * choices.length)];
+        }
+        this.idleGesture = next;
+        this.lastIdleGesture = next;
+        this.idleDue = time + IDLE_GESTURES[next];
+        return next;
     }
 
     resolve() {
         const time = this.now();
-        for (const [key, job] of this.jobs) if (job.until <= time) this.jobs.delete(key);
+        let job;
+        for (const [key, pending] of this.jobs) {
+            if (pending.until <= time) this.jobs.delete(key);
+            else if (!job || pending.state === 'working') job = pending;
+        }
         if (this.reaction?.until <= time) this.reaction = null;
-        const job = [...this.jobs.values()].find(item => item.state === 'working') || this.jobs.values().next().value;
         // Stop displacement in main, then blend into an animated interaction pose here.
         // On a wall retain a grip; falling keeps its physical pose until landing.
-        const focus = this.now() - this.interactionSince < 0.65 ? 'pointerNotice' : 'pointerFocus';
-        const next = this.dragging ? 'dragging'
+        const focus = time - this.interactionSince < 0.65 ? 'pointerNotice' : 'pointerFocus';
+        let next = this.dragging ? 'dragging'
             : this.locomotion === 'climbing' ? ((this.interacting || this.reaction || this.speechUntil > time || job) ? 'clinging' : 'climbing')
                 : ['falling', 'mantling', 'landing'].includes(this.locomotion) ? this.locomotion
                     : this.reaction?.state || (this.speechUntil > time ? 'speaking' : job?.state)
                         || (this.interacting ? focus : this.locomotion);
+        if (next === 'idle') {
+            next = this.resolveIdle(time);
+        } else {
+            this.idleSince = null;
+            this.idleGesture = null;
+        }
         // Pointer interaction has its own pause owner in main; do not report it as chat busy.
         const busy = Boolean(this.dragging || this.reaction || this.speechUntil > time || job);
         if (next !== this.current || busy !== this.busy) {

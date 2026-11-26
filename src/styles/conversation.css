@@ -107,3 +107,15 @@
     .conversation-thinking span { animation:none; opacity:.7; }
     .conversation-examples button { transition:none; }
 }
+.conversation-modes { display:flex; gap:2px; margin-inline-start:auto; padding:3px; border-radius:14px; background:#f8edf2; }
+.conversation-modes button { padding:6px 11px; border-radius:11px; font-size:12px; color:#866779; }
+.conversation-modes button[aria-pressed="true"] { background:white; color:#af4076; box-shadow:0 1px 4px #a5447024; }
+.group-replay { flex:1; min-height:0; overflow:auto; padding:clamp(14px,2vw,26px); border:1px solid #f4dfe9; border-radius:20px; background:rgba(255,255,255,.65); }
+.replay-fields { display:grid; gap:16px; min-width:0; padding:0; border:0; }
+.replay-pair { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr)); gap:14px; }
+.group-replay .replay-script { min-height:9em; max-height:24em; width:100%; line-height:1.8; resize:vertical; padding:10px; border:1px solid #efdbe5; border-radius:12px; background:rgba(255,255,255,.72); }
+.group-replay .replay-script:focus-visible { outline:2px solid #dc96b6; }
+.replay-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.replay-result { border-top:1px solid #f1d7e3; margin-top:18px; padding-top:16px; font-size:13px; color:#735966; }
+.replay-result p { white-space:pre-wrap; margin:6px 0; }
+.replay-result img { margin-top:8px; max-width:140px; max-height:140px; object-fit:contain; }

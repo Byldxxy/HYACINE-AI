@@ -77,6 +77,13 @@ test('starts an isolated backend and validates management API boundaries', async
     await waitForReady(child);
     const baseUrl = `http://127.0.0.1:${port}`;
 
+    const replay = await fetch(`${baseUrl}/api/group-replay`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: '甲：@乙 今晚打游戏吗？\n乙：[#1] 九点见' }),
+    });
+    assert.equal(replay.status, 200);
+    assert.deepEqual(await replay.json(), { kind: 'silent', outputs: [], modelCalled: false });
+
     const imageData = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
     const uploaded = await fetch(`${baseUrl}/api/stickers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ meaning: '开心', data: imageData }) }).then(r => r.json());
     assert.equal(uploaded.success, true);
@@ -122,6 +129,28 @@ test('starts an isolated backend and validates management API boundaries', async
     // Exact shape also guards against accidentally exposing a key, provider URL, model name, or QQ ID.
     assert.deepEqual(configuredStatus, { ...initialStatus, model: { configured: true } });
 
+    const patch = (route, body) => fetch(baseUrl + route, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const field = (key, before, after) => patch('/api/config', { changes: { [key]: after }, base: { [key]: before } });
+    const concurrent = await Promise.all([field('modelName', 'integration-model', 'first'), field('modelName', 'integration-model', 'second')]);
+    assert.deepEqual(concurrent.map(r => r.status).sort(), [200, 409]);
+    assert.equal((await field('temperature', undefined, 1.4)).status, 200);
+    const configView = await fetch(baseUrl + '/api/config').then(r => r.json());
+    assert.equal(configView.temperature, 1.4);
+    assert.ok(['first', 'second'].includes(configView.modelName));
+    assert.ok(configView.apiKey.startsWith('***'));
+    const oldSecret = { base: { apiKey: configView.apiKey }, secretVersions: configView._secretVersions };
+    assert.equal((await patch('/api/config', { ...oldSecret, changes: { apiKey: 'another-secret' } })).status, 200);
+    assert.equal((await patch('/api/config', { ...oldSecret, changes: { apiKey: 'overwritten-secret' } })).status, 409);
+
+    const edit = operations => patch('/api/persistent-memory', { operations });
+    const firstFact = { rowId: 'first', fact: '早班', source: 'group_1', time: '' };
+    const secondFact = { ...firstFact, rowId: 'second', fact: '夜班' };
+    assert.equal((await edit([{ id: 'first', after: firstFact }])).status, 200);
+    assert.equal((await edit([{ id: 'second', after: secondFact }])).status, 200);
+    assert.equal((await edit([{ id: 'first', before: firstFact, after: { ...firstFact, fact: '轮班' } }])).status, 200);
+    assert.equal((await edit([{ id: 'second', before: secondFact, after: null }, { id: 'first', before: firstFact, after: null }])).status, 409);
+    assert.deepEqual((await fetch(baseUrl + '/api/persistent-memory').then(r => r.json())).map(f => f.fact), ['轮班', '夜班']);
+
     const invalidMemory = await fetch(`${baseUrl}/api/memory/test`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -146,7 +175,7 @@ test('real reverse WebSocket routes receipts, deduplicates reconnects and ignore
         for await (const _chunk of req) { /* Drain this isolated test request. */ }
         requests++;
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ choices: [{ message: { content: '这是本轮的回复。' } }] }));
+        res.end(JSON.stringify({ choices: [{ message: { content: '这是本轮的回复。' } }], usage: { prompt_tokens: 17, completion_tokens: 8 } }));
     });
     try { await new Promise((resolve, reject) => { provider.once('error', reject); provider.listen(0, '127.0.0.1', resolve); }); }
     catch (error) { await fs.rm(directory, { recursive: true, force: true }); if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('loopback unavailable'); return; } throw error; }
@@ -179,6 +208,11 @@ test('real reverse WebSocket routes receipts, deduplicates reconnects and ignore
     const last = packets[1]; last.ws.send(JSON.stringify({ echo: last.p.echo, status: 'failed', retcode: 100, data: null }));
     await until(() => uiLogs.some(line => line.includes('回复中止'))); // Wait for the failed receipt to be handled.
     assert.equal((await fetch(`${url}/api/memory/group_100`).then(r => r.json())).length, 2);
+    const { rows } = await fetch(url + '/api/metrics').then(r => r.json());
+    const direct = rows.find(row => row.group === 'group_100' && row.kind === 'direct');
+    assert.equal(direct.calls, 2); assert.equal(direct.inputTokens, 34); assert.equal(direct.outputTokens, 16);
+    assert.equal(direct.sent, 1); assert.equal(direct.error, 1);
+    assert.equal(direct.deliveries, 2);
 });
 
 test('channel switching authenticates official callbacks and connects SnowLuma without exposing secrets', async t => {
@@ -203,7 +237,12 @@ test('channel switching authenticates official callbacks and connects SnowLuma w
     });
     await waitForReady(child);
     const base = `http://127.0.0.1:${port}`;
-    const save = async config => { const r = await fetch(`${base}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) }); assert.equal(r.status, 200); };
+    const save = async config => {
+        const resource = base + '/api/config';
+        const current = await fetch(resource);
+        const r = await fetch(resource, { method: 'POST', headers: { 'Content-Type': 'application/json', 'If-Match': current.headers.get('etag') }, body: JSON.stringify(config) });
+        assert.equal(r.status, 200);
+    };
     const status = () => fetch(`${base}/api/status`).then(r => r.json());
     const config = { qqProvider: 'qqbot', qqBotAppId: '123', qqBotSecret: 'test-secret', enableProactive: false };
     await save(config);
